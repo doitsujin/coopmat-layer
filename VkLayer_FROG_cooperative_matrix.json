@@ -1,0 +1,20 @@
+{
+    "file_format_version" : "1.0.0",
+    "layer" : {
+      "name": "VK_LAYER_FROG_cooperative_matrix",
+      "type": "GLOBAL",
+      "api_version": "1.4.307",
+      "library_path": "VkLayer_FROG_cooperative_matrix.so",
+      "implementation_version": "1",
+      "description": "Cooperative matrix emulation layer",
+      "functions": {
+         "vkNegotiateLoaderLayerInterfaceVersion": "vkNegotiateLoaderLayerInterfaceVersion"
+      },
+      "enable_environment": {
+        "ENABLE_VKROOTS_TEST_1": "1"
+      },
+      "disable_environment": {
+        "DISABLE_VKROOTS_TEST_1": "1"
+      }
+    }
+}
