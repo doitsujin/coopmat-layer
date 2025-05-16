@@ -856,21 +856,18 @@ struct CoopmatMulAddFn {
       mod.defConstUint32(uint32_t(spv::ScopeSubgroup)), vectorId,
       mod.defConstUint32(laneMask));
 
+    /* Add both halves together, potentially taking advantage of packed math */
+    spv::Op opcode = util::isFloatType(resultType) ? spv::OpFAdd : spv::OpIAdd;
+    vectorId = mod.op(opcode, vectorTypeId, vectorId, shuffleId);
+
     /* Check lane ID on whether to pick the high or low compnents */
     uint32_t selectHiId = mod.op(spv::OpINotEqual, mod.defBoolType(0u),
       mod.op(spv::OpBitwiseAnd, uintType, laneId, mod.defConstUint32(laneMask)),
       mod.defConstUint32(0u));
 
-    vectorId = mod.op(spv::OpSelect, vectorTypeId, selectHiId,
-      mod.op(spv::OpVectorShuffle, vectorTypeId, vectorId, shuffleId, 1u, 3u),
-      mod.op(spv::OpVectorShuffle, vectorTypeId, vectorId, shuffleId, 0u, 2u));
-
-    /* Add both halves of the row together for the final result */
-    spv::Op opcode = util::isFloatType(resultType) ? spv::OpFAdd : spv::OpIAdd;
-
-    uint32_t resultId = mod.op(opcode, typeId,
-      mod.op(spv::OpCompositeExtract, typeId, vectorId, 0u),
-      mod.op(spv::OpCompositeExtract, typeId, vectorId, 1u));
+    uint32_t resultId = mod.op(spv::OpSelect, typeId, selectHiId,
+      mod.op(spv::OpCompositeExtract, typeId, vectorId, 1u),
+      mod.op(spv::OpCompositeExtract, typeId, vectorId, 0u));
 
     return resultId;
   }
