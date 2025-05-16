@@ -1086,7 +1086,7 @@ public:
         case spv::OpCooperativeMatrixLoadKHR: {
           auto* matrixType = findCoopmatType(ins.arg(1u));
 
-          auto [dstArray, dstOffset] = rewriteCoopmatLoadStoreAccessChain(ins.arg(3u));
+          auto [srcArray, srcOffset, srcStride] = rewriteCoopmatLoadStoreAccessChain(ins.arg(3u), ins.arg(5u));
           auto layout = spv::CooperativeMatrixLayout(m_builder.evaluateConstant(ins.arg(4u)));
 
           SpirvInstructionBuilder arrayOp(spv::OpCompositeConstruct, matrixType->arrayTypeId, m_builder.allocId());
@@ -1100,7 +1100,7 @@ public:
             uint32_t coord = computeMemoryLocation(matrixType, i, layout);
 
             uint32_t id = loadMatrixElement(matrixType, layout,
-              dstArray, dstOffset, coord, ins.arg(5u), operands.size(), operands.data());
+              srcArray, srcOffset, coord, srcStride, operands.size(), operands.data());
 
             arrayOp.add(id);
           }
@@ -1150,7 +1150,7 @@ public:
         case spv::OpCooperativeMatrixStoreKHR: {
           auto* matrixType = findCoopmatType(m_builder.getOperandTypeId(ins.arg(2u)));
 
-          auto [dstArray, dstOffset] = rewriteCoopmatLoadStoreAccessChain(ins.arg(1u));
+          auto [dstArray, dstOffset, dstStride] = rewriteCoopmatLoadStoreAccessChain(ins.arg(1u), ins.arg(4u));
           auto layout = spv::CooperativeMatrixLayout(m_builder.evaluateConstant(ins.arg(3u)));
 
           std::vector<uint32_t> operands;
@@ -1179,7 +1179,7 @@ public:
             uint32_t elementId = m_builder.op(spv::OpCompositeExtract, matrixType->vectorTypeId, id, 0u, i);
 
             storeMatrixElement(matrixType, layout, elementId,
-              dstArray, dstOffset, coord, ins.arg(4u), operands.size(), operands.data());
+              dstArray, dstOffset, coord, dstStride, operands.size(), operands.data());
           }
         } break;
 
@@ -1232,7 +1232,7 @@ private:
 
   bool          m_emittedTypes = false;
 
-  std::pair<SpirvInstructionBuilder, uint32_t> rewriteCoopmatLoadStoreAccessChain(uint32_t operandId) {
+  std::tuple<SpirvInstructionBuilder, uint32_t, uint32_t> rewriteCoopmatLoadStoreAccessChain(uint32_t operandId, uint32_t strideId) {
     SpirvInstructionBuilder def = m_builder.getOperandDefinition(operandId);
 
     if (def.op() != spv::OpAccessChain && def.op() != spv::OpInBoundsAccessChain) {
@@ -1258,7 +1258,7 @@ private:
     for (uint32_t i = 3u; i + 1u < def.len(); i++)
       result.add(def.arg(i));
 
-    return std::make_pair(result, def.arg(def.len() - 1u));
+    return std::tuple(result, def.arg(def.len() - 1u), strideId);
   }
 
 
