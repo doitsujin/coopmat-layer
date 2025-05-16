@@ -19,3 +19,10 @@ freely, subject to the following restrictions:
   be misrepresented as being the original software.
 
 – This notice may not be removed or altered from any source distribution.
+
+
+------------------------------------------------------------------------
+
+Uses vkroots.h (https://github.com/misyltoad/vkroots), which is:
+
+"Licensed under Apache-2.0 OR MIT to be compatible with the Vulkan Registry XML."
