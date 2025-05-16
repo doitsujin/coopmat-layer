@@ -469,7 +469,7 @@ struct CoopmatTransposeBlockFn {
     mod.op(spv::OpFunctionEnd, 0u);
 
     std::stringstream name;
-    name << type->name << "_Transpose_4x4";
+    name << type->name << "_Transpose" << type->vectorSize << "x" << type->vectorSize;
 
     mod.setDebugName(funcId, name.str());
     return funcId;
