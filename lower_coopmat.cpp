@@ -687,7 +687,7 @@ struct CoopmatMulAddFn {
             uint32_t intermediateVectorTypeId = mod.defVectorType(intermediateType, aType->vectorSize);
 
             uint32_t dotProductId = mod.op(spv::OpFMul, aType->vectorTypeId, aElements, bElements);
-            dotProductId = mod.convert(intermediateVectorTypeId, aType->vectorTypeId, dotProductId);
+            dotProductId = mod.convert(intermediateVectorTypeId, dotProductId);
 
             if (aType->vectorSize > 1u) {
               uint32_t localSumId = mod.op(spv::OpCompositeExtract, intermediateTypeId, dotProductId, 0u);
@@ -730,11 +730,11 @@ struct CoopmatMulAddFn {
 
       /* Load accumulator and accumulate */
       uint32_t accumId = emitLoadCMatrix(mod, cId, baseRow);
-      accumId = mod.convert(intermediateTypeId, cType->scalarTypeId, accumId);
+      accumId = mod.convert(intermediateTypeId, accumId);
 
       spv::Op addOp = util::isFloatType(dType->scalarType) ? spv::OpFAdd : spv::OpIAdd;
       accumId = mod.op(addOp, intermediateTypeId, accumId, registerRows.at(0));
-      accumId = mod.convert(dType->scalarTypeId, intermediateTypeId, accumId);
+      accumId = mod.convert(dType->scalarTypeId, accumId);
 
       if (dType->vectorSize > 1u) {
         if (!(baseRow & dType->vectorSize))
@@ -835,7 +835,7 @@ struct CoopmatMulAddFn {
         ? util::getSignedType(type->scalarType)
         : util::getUnsignedType(type->scalarType), type->vectorSize);
 
-      inputId = mod.convert(inputType, type->vectorTypeId, inputId);
+      inputId = mod.convert(inputType, inputId);
     }
 
     return inputId;
@@ -1348,7 +1348,7 @@ private:
       if (!newTypeId)
         return 0u;
 
-      return m_builder.op(spv::OpBitcast, newTypeId, baseId);
+      return m_builder.bitcast(newTypeId, baseId);
     } else if (type.storageClass == spv::StorageClassStorageBuffer) {
       /* The base must be some sort of variable with optional set / binding decorations */
       if (def.op() != spv::OpVariable)
@@ -1627,7 +1627,7 @@ private:
         for (uint32_t j = 0u; j < loadsPerMatScalar; j++)
           vectorOp.add(memScalars.at(i * loadsPerMatScalar + j));
 
-        resultId = m_builder.op(spv::OpBitcast, type->scalarTypeId, m_builder.addIns(vectorOp));
+        resultId = m_builder.bitcast(type->scalarTypeId, m_builder.addIns(vectorOp));
 
         if (type->vectorSize > 1u)
           resultOp.add(resultId);
@@ -1646,14 +1646,12 @@ private:
         vectorOp.add(memScalars.at(i));
 
       uint32_t resultId = m_builder.addIns(vectorOp);
-
-      if (vectorType != type->vectorTypeId)
-        resultId = m_builder.op(spv::OpBitcast, type->vectorTypeId, resultId);
+      resultId = m_builder.bitcast(type->vectorTypeId, resultId);
 
       return resultId;
     } else {
       /* One memory scalar covers entire matrix vector, bitcast directly. */
-      return m_builder.op(spv::OpBitcast, type->vectorTypeId, memScalars.at(0u));
+      return m_builder.bitcast(type->vectorTypeId, memScalars.at(0u));
     }
   }
 
@@ -1730,7 +1728,7 @@ private:
         if (type->vectorSize > 1u)
           matScalar = m_builder.op(spv::OpCompositeExtract, type->scalarTypeId, id, i / storesPerMatScalar);
 
-        uint32_t matVector = m_builder.op(spv::OpBitcast, vectorType, matScalar);
+        uint32_t matVector = m_builder.bitcast(vectorType, matScalar);
         valueId = m_builder.op(spv::OpCompositeExtract, memScalarType, matVector, i % storesPerMatScalar);
       } else if (matVectorSize > memScalarSize) {
         /* Pick one or more scalars from the source and bitcast to memory scalar */
@@ -1754,11 +1752,10 @@ private:
           valueId = m_builder.addIns(swizzle);
         }
 
-        if (elementType != memScalarType)
-          valueId = m_builder.op(spv::OpBitcast, memScalarType, valueId);
+        valueId = m_builder.bitcast(memScalarType, valueId);
       } else {
         /* Bitcast source vector to memory scalar directly */
-        valueId = m_builder.op(spv::OpBitcast, memScalarType, id);
+        valueId = m_builder.bitcast(memScalarType, id);
       }
 
       SpirvInstructionBuilder storeOp(spv::OpStore);

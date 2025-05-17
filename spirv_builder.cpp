@@ -719,8 +719,9 @@ uint32_t SpirvBuilder::wrap(
 
 uint32_t SpirvBuilder::convert(
         uint32_t                      dstTypeId,
-        uint32_t                      srcTypeId,
         uint32_t                      operandId) {
+  auto srcTypeId = getOperandTypeId(operandId);
+
   if (dstTypeId == srcTypeId)
     return operandId;
 
@@ -758,6 +759,17 @@ uint32_t SpirvBuilder::convert(
   }
 }
 
+
+uint32_t SpirvBuilder::bitcast(
+        uint32_t                      dstTypeId,
+        uint32_t                      operandId) {
+  auto srcTypeId = getOperandTypeId(operandId);
+
+  if (dstTypeId == srcTypeId)
+    return operandId;
+
+  return op(spv::OpBitcast, dstTypeId, operandId);
+}
 
 std::optional<uint32_t> SpirvBuilder::getDecoration(
         uint32_t                      id,
