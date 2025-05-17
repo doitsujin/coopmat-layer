@@ -1403,9 +1403,45 @@ public:
 
         case spv::OpCooperativeMatrixLoadKHR: {
           auto* matrixType = findCoopmatType(ins.arg(1u));
+          auto layout = spv::CooperativeMatrixLayout(m_builder.evaluateConstant(ins.arg(4u)).value());
+
+          auto accessChain = m_builder.getOperandDefinition(ins.arg(3u));
+
+          if ((accessChain.op() == spv::OpAccessChain || accessChain.op() == spv::OpInBoundsAccessChain)
+           && accessChain.arg(3u) == m_dxilSpvTransposeScratchId && m_dxilSpvTransposeStoreId) {
+            auto srcType = findCoopmatType(m_builder.getOperandTypeId(m_dxilSpvTransposeStoreId));
+
+            uint32_t matrixId = m_dxilSpvTransposeStoreId;
+
+            bool sameLoadStoreLayout = layout != m_dxilSpvTransposeStoreLayout;
+            bool sameNativeLayout = matrixType->layout != srcType->layout;
+
+            if (sameLoadStoreLayout != sameNativeLayout) {
+              uint32_t srcTransposeFn = m_functions.get(CoopmatTransposeBlockFn { srcType }, m_builder, defLaneId());
+              srcTransposeFn = m_functions.get(CoopmatTransposeMatrixFn { srcType }, m_builder, srcTransposeFn, defLaneId());
+
+              SpirvInstructionBuilder transposeOp(spv::OpFunctionCall, srcType->typeId, m_builder.allocId());
+              transposeOp.add(srcTransposeFn);
+              transposeOp.add(m_builder.wrap(srcType->typeId, m_dxilSpvTransposeStoreId));
+
+              matrixId = m_builder.addIns(transposeOp);
+            }
+
+            CoopmatConvertFn fnInfo = { };
+            fnInfo.dstType = matrixType;
+            fnInfo.srcType = srcType;
+
+            SpirvInstructionBuilder callOp(spv::OpFunctionCall, ins.arg(1u), ins.arg(2u));
+            callOp.add(m_functions.get(fnInfo, m_builder));
+            callOp.add(m_builder.wrap(srcType->typeId, matrixId));
+            m_builder.addIns(callOp);
+
+            m_dxilSpvTransposeStoreId = 0u;
+            m_dxilSpvTransposeStoreLayout = spv::CooperativeMatrixLayoutMax;
+            break;
+          }
 
           auto [srcArray, srcOffset, srcStride] = rewriteCoopmatLoadStoreAccessChain(ins.arg(3u), ins.arg(5u));
-          auto layout = spv::CooperativeMatrixLayout(m_builder.evaluateConstant(ins.arg(4u)).value());
 
           CoopmatBuilder result(m_builder, *matrixType);
 
@@ -1470,9 +1506,18 @@ public:
 
         case spv::OpCooperativeMatrixStoreKHR: {
           auto* matrixType = findCoopmatType(m_builder.getOperandTypeId(ins.arg(2u)));
+          auto layout = spv::CooperativeMatrixLayout(m_builder.evaluateConstant(ins.arg(3u)).value());
+
+          auto accessChain = m_builder.getOperandDefinition(ins.arg(1u));
+
+          if ((accessChain.op() == spv::OpAccessChain || accessChain.op() == spv::OpInBoundsAccessChain)
+           && accessChain.arg(3u) == m_dxilSpvTransposeScratchId) {
+            m_dxilSpvTransposeStoreId = ins.arg(2u);
+            m_dxilSpvTransposeStoreLayout = layout;
+            break;
+          }
 
           auto [dstArray, dstOffset, dstStride] = rewriteCoopmatLoadStoreAccessChain(ins.arg(1u), ins.arg(4u));
-          auto layout = spv::CooperativeMatrixLayout(m_builder.evaluateConstant(ins.arg(3u)).value());
 
           std::vector<uint32_t> operands;
 
@@ -1522,6 +1567,17 @@ public:
           m_builder.addIns(callOp);
         } break;
 
+        case spv::OpVariable: {
+          auto storageClass = spv::StorageClass(ins.arg(3u));
+          auto id = ins.arg(2u);
+
+          /* DXIL-SPIRV hack: Intercept transpose load/store pairs to avoid LDS round-trip */
+          if (storageClass == spv::StorageClassWorkgroup && m_builder.getName(id) == "LDSTransposeScratch")
+            m_dxilSpvTransposeScratchId = id;
+
+          m_builder.addIns(SpirvInstructionBuilder(ins));
+        } break;
+
         case spv::OpFunction: {
           emitCooperativeMatrixTypes();
           m_builder.addIns(SpirvInstructionBuilder(ins));
@@ -1552,6 +1608,10 @@ private:
   CoopmatFunctions        m_functions;
 
   SpirvInstructionBuilder m_laneId = { };
+
+  uint32_t      m_dxilSpvTransposeScratchId = 0u;
+  uint32_t      m_dxilSpvTransposeStoreId = 0u;
+  spv::CooperativeMatrixLayout m_dxilSpvTransposeStoreLayout = spv::CooperativeMatrixLayoutMax;
 
   bool          m_emittedTypes = false;
 
