@@ -462,6 +462,22 @@ public:
           uint32_t                      srcTypeId,
           uint32_t                      operandId);
 
+  /**
+   * \brief Finds applicable decoration
+   *
+   * \param [in] id Object ID
+   * \param [in] member Member index, pass -1 to ignore
+   * \param [in] decoration Decoration type
+   * \returns Decoration value if applicable, or 0 if
+   *    the decoration exists for the given ID but has
+   *    no value, or \c nullopt if the decoration does
+   *    not exist for the given ID.
+   */
+  std::optional<uint32_t> getDecoration(
+          uint32_t                      id,
+          int32_t                       member,
+          spv::Decoration               decoration) const;
+
 private:
 
   SpirvHeader                           m_header;

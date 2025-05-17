@@ -1226,6 +1226,8 @@ private:
   std::unordered_map<uint32_t, CoopmatType> m_coopmatTypes;
   std::vector<SpirvInstructionBuilder>      m_coopmatConstants;
 
+  std::unordered_map<uint32_t, uint32_t>    m_bufferResourceMap;
+
   CoopmatFunctions        m_functions;
 
   SpirvInstructionBuilder m_laneId = { };
@@ -1233,6 +1235,7 @@ private:
   bool          m_emittedTypes = false;
 
   std::tuple<SpirvInstructionBuilder, uint32_t, uint32_t> rewriteCoopmatLoadStoreAccessChain(uint32_t operandId, uint32_t strideId) {
+    uint32_t uintType = m_builder.defVectorType(VK_COMPONENT_TYPE_UINT32_KHR, 0u);
     SpirvInstructionBuilder def = m_builder.getOperandDefinition(operandId);
 
     if (def.op() != spv::OpAccessChain && def.op() != spv::OpInBoundsAccessChain) {
@@ -1240,25 +1243,270 @@ private:
       return {};
     }
 
-    /* Get storage class of requested pointer type */
-    spv::StorageClass storageClass = m_builder.getTypeInfo(def.typeId()).storageClass;
+    /* Get info about the array type we're indexing into */
+    auto typeInfo = m_builder.getTypeInfo(def.typeId());
+    auto typeSize = util::getComponentSize(typeInfo.scalarType) * std::max(1u, typeInfo.vectorSize);
 
-    /* Traverse access chain to find array type */
-    uint32_t arrayTypeId = m_builder.getTypeInfo(m_builder.getOperandTypeId(def.arg(3u))).baseTypeId;
+    /* Get new access chain and offset ID */
+    auto [accessChain, offsetId] = rewriteAccessChain(def.id());
 
-    for (uint32_t i = 4u; i + 1u < def.len(); i++)
-      arrayTypeId = m_builder.getMemberTypeId(arrayTypeId, def.arg(i));
+    /* If the base type uses sub-dword scalars, try to promote to dwords */
+    if (util::getComponentSize(typeInfo.scalarType) < sizeof(uint32_t)) {
+      uint32_t newBaseId = rewriteBufferResource(accessChain.arg(3u));
 
-    /* Define new pointer type with the appropriate storage class */
-    uint32_t ptrTypeId = m_builder.defPointerType(arrayTypeId, storageClass);
+      if (newBaseId) {
+        /* Adjust offset and stride to match the new type */
+        if (typeSize != sizeof(uint32_t)) {
+          if (typeSize > 1u) {
+            uint32_t oldSizeId = m_builder.defConstUint32(typeSize);
+            offsetId = m_builder.op(spv::OpIMul, uintType, offsetId, oldSizeId);
+            strideId = m_builder.op(spv::OpIMul, uintType, strideId, oldSizeId);
+          }
 
-    /* Copy all but the last operand */
-    SpirvInstructionBuilder result(def.op(), ptrTypeId, m_builder.allocId());
+          uint32_t newSizeId = m_builder.defConstUint32(sizeof(uint32_t));
+          offsetId = m_builder.op(spv::OpUDiv, uintType, offsetId, newSizeId);
+          strideId = m_builder.op(spv::OpUDiv, uintType, strideId, newSizeId);
+        }
 
-    for (uint32_t i = 3u; i + 1u < def.len(); i++)
-      result.add(def.arg(i));
+        accessChain.set(3u, newBaseId);
+        accessChain.set(1u, getAccessChainPointerTypeId(accessChain));
+      }
+    }
 
-    return std::tuple(result, def.arg(def.len() - 1u), strideId);
+    return std::tuple(accessChain, offsetId, strideId);
+  }
+
+
+  std::pair<SpirvInstructionBuilder, uint32_t> rewriteAccessChain(uint32_t operandId) {
+    SpirvInstructionBuilder def = m_builder.getOperandDefinition(operandId);
+    SpirvInstructionBuilder op = chainAccessChainsRecursive(def.arg(3u));
+
+    for (uint32_t i = 4u; i < def.len() - 1u; i++)
+      op.add(def.arg(i));
+
+    uint32_t finalId = def.arg(def.len() - 1u);
+    op.set(1u, getAccessChainPointerTypeId(op));
+
+    return std::make_pair(op, finalId);
+  }
+
+
+  SpirvInstructionBuilder chainAccessChainsRecursive(uint32_t baseId) {
+    SpirvInstructionBuilder def = m_builder.getOperandDefinition(baseId);
+
+    if (def.op() == spv::OpAccessChain || def.op() == spv::OpInBoundsAccessChain) {
+      auto op = chainAccessChainsRecursive(def.arg(3u));
+
+      for (uint32_t i = 4u; i < def.len(); i++)
+        op.add(def.arg(i));
+
+      return op;
+    } else {
+      /* Don't define a type ID yet because we don't know
+       * how long the access chain is going to be */
+      SpirvInstructionBuilder op(spv::OpAccessChain);
+      op.add(0u);
+      op.add(m_builder.allocId());
+      op.add(baseId);
+
+      return op;
+    }
+  }
+
+
+  uint32_t getAccessChainPointerTypeId(const SpirvInstructionBuilder& op) {
+    auto baseDef = m_builder.getOperandDefinition(op.arg(3u));
+    auto typeId = baseDef.arg(1u);
+
+    if (op.len() <= 4u)
+      return typeId;
+
+    auto storageClass = m_builder.getTypeInfo(typeId).storageClass;
+
+    for (uint32_t i = 4u; i < op.len(); i++)
+      typeId = m_builder.getMemberTypeId(typeId, op.arg(i));
+
+    return m_builder.defPointerType(typeId, storageClass);
+  }
+
+
+  uint32_t rewriteBufferResource(uint32_t baseId) {
+    auto e = m_bufferResourceMap.find(baseId);
+
+    if (e != m_bufferResourceMap.end())
+      return e->second;
+
+    auto def = m_builder.getOperandDefinition(baseId);
+    auto typeId = m_builder.getOperandTypeId(baseId);
+    auto type = m_builder.getTypeInfo(typeId);
+
+    if (type.storageClass == spv::StorageClassPhysicalStorageBuffer) {
+      /* BDA types are convenient since we can trivially bitcast
+       * to another pointer type and call it a day */
+      uint32_t newTypeId = rewriteBufferType(typeId);
+
+      if (!newTypeId)
+        return 0u;
+
+      return m_builder.op(spv::OpBitcast, newTypeId, baseId);
+    } else if (type.storageClass == spv::StorageClassStorageBuffer) {
+      /* The base must be some sort of variable with optional set / binding decorations */
+      if (def.op() != spv::OpVariable)
+        return 0u;
+
+      auto descriptorSet = m_builder.getDecoration(baseId, -1, spv::DecorationDescriptorSet);
+      auto descriptorBinding = m_builder.getDecoration(baseId, -1, spv::DecorationBinding);
+
+      uint32_t newTypeId = rewriteBufferType(typeId);
+
+      if (!newTypeId)
+        return 0u;
+
+      uint32_t newVarId = m_builder.op(spv::OpVariable, newTypeId, def.arg(3u));
+
+      if (descriptorSet)
+        m_builder.op(spv::OpDecorate, 0u, newVarId, uint32_t(spv::DecorationDescriptorSet), *descriptorSet);
+      if (descriptorBinding)
+        m_builder.op(spv::OpDecorate, 0u, newVarId, uint32_t(spv::DecorationBinding), *descriptorBinding);
+
+      m_builder.registerVariable(newVarId);
+      m_bufferResourceMap.insert({ baseId, newVarId });
+      return newVarId;;
+    } else {
+      /* Unsupported thing, ignore */
+      return 0u;
+    }
+  }
+
+
+  uint32_t rewriteBufferType(uint32_t baseTypeId) {
+    auto e = m_bufferResourceMap.find(baseTypeId);
+
+    if (e != m_bufferResourceMap.end())
+      return e->second;
+
+    auto def = m_builder.getOperandDefinition(baseTypeId);
+
+    uint32_t rewriteId = 0u;
+
+    switch (def.op()) {
+      case spv::OpTypeStruct: {
+        rewriteId = rewriteBufferStructType(def);
+      } break;
+
+      case spv::OpTypePointer: {
+        auto storageClass = spv::StorageClass(def.arg(2u));
+
+        if (storageClass != spv::StorageClassStorageBuffer
+         && storageClass != spv::StorageClassPhysicalStorageBuffer)
+          return 0u;
+
+        uint32_t baseId = rewriteBufferType(def.arg(3u));
+
+        if (!baseId)
+          return 0u;
+
+        rewriteId = m_builder.defPointerType(baseId, storageClass);
+      } break;
+
+      case spv::OpTypeArray:
+      case spv::OpTypeRuntimeArray: {
+        /* Might be a value array */
+        if ((rewriteId = rewriteBufferArrayType(def)))
+          break;
+
+        /* Might be a descriptor array */
+        auto baseDef = m_builder.getOperandDefinition(def.arg(2u));
+
+        if (auto baseId = rewriteBufferStructType(baseDef)) {
+          rewriteId = def.op() == spv::OpTypeArray
+            ? m_builder.op(spv::OpTypeArray, 0u, baseId, def.arg(3u))
+            : m_builder.op(spv::OpTypeRuntimeArray, 0u, baseId);
+        }
+      } break;
+
+      default:
+        return 0u;
+    }
+
+    if (rewriteId)
+      m_bufferResourceMap.insert({ def.id(), rewriteId });
+
+    return rewriteId;
+  }
+
+
+  uint32_t rewriteBufferStructType(const SpirvInstructionBuilder& def) {
+    /* Only support struct types that contain a single scalar or vector array
+     * for now. Also require a block decoration since that is used for any
+     * memory interface declaration. */
+    if (def.len() != 3u)
+      return 0u;
+
+    auto memberOffset = m_builder.getDecoration(def.id(), 0, spv::DecorationOffset);
+
+    if (!m_builder.getDecoration(def.id(), -1, spv::DecorationBlock) || !memberOffset)
+      return 0u;
+
+    auto arrayDef = m_builder.getOperandDefinition(def.arg(2u));
+
+    if (arrayDef.op() != spv::OpTypeArray
+     && arrayDef.op() != spv::OpTypeRuntimeArray)
+      return 0u;
+
+    uint32_t arrayId = rewriteBufferArrayType(arrayDef);
+
+    /* Declare struct type */
+    SpirvInstructionBuilder structOp(spv::OpTypeStruct, 0u, m_builder.allocId());
+    structOp.add(arrayId);
+
+    uint32_t structId = m_builder.addIns(structOp);
+
+    m_builder.op(spv::OpDecorate, 0u, structId, uint32_t(spv::DecorationBlock));
+    m_builder.op(spv::OpMemberDecorate, 0u, structId, 0u, uint32_t(spv::DecorationOffset), *memberOffset);
+    m_builder.setDebugName(structId, "CoopMat_Memory");
+    return structId;
+  }
+
+
+  uint32_t rewriteBufferArrayType(const SpirvInstructionBuilder& def) {
+    uint32_t arrayStride = m_builder.getDecoration(def.id(), -1, spv::DecorationArrayStride).value_or(0u);
+    uint32_t vectorSize = 1u;
+
+    auto vectorDef = m_builder.getOperandDefinition(def.arg(2u));
+    auto scalarDef = vectorDef;
+
+    if (vectorDef.op() == spv::OpTypeVector) {
+      scalarDef = m_builder.getOperandDefinition(vectorDef.arg(2u));
+      vectorSize = vectorDef.arg(3u);
+    }
+
+    if (scalarDef.op() != spv::OpTypeFloat
+     && scalarDef.op() != spv::OpTypeInt)
+      return 0u;
+
+    /* Ensure that the array stride matches the vector size, otherwise we
+     * cannot meaningfully change the struct type */
+    if (arrayStride != vectorSize * (scalarDef.arg(2u) / 8u))
+      return 0u;
+
+    /* Declare array type using dwords as a base unit */
+    SpirvInstructionBuilder arrayOp(def.op(), 0u, m_builder.allocId());
+    arrayOp.add(m_builder.defVectorType(VK_COMPONENT_TYPE_UINT32_KHR, 0u));
+
+    if (def.op() == spv::OpTypeArray) {
+      uint32_t arraySize = m_builder.evaluateConstant(def.arg(3u));
+
+      if (!arraySize)
+        return 0u;
+
+      arrayOp.add(m_builder.defConstUint32(arraySize * arrayStride / sizeof(uint32_t)));
+    }
+
+    uint32_t arrayId = m_builder.addIns(arrayOp);
+
+    m_builder.op(spv::OpDecorate, 0u, arrayId, uint32_t(spv::DecorationArrayStride), uint32_t(sizeof(uint32_t)));
+    return arrayId;
   }
 
 

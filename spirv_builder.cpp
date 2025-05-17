@@ -759,6 +759,27 @@ uint32_t SpirvBuilder::convert(
 }
 
 
+std::optional<uint32_t> SpirvBuilder::getDecoration(
+        uint32_t                      id,
+        int32_t                       member,
+        spv::Decoration               decoration) const {
+  auto d = m_decorations.equal_range(id);
+
+  for (auto i = d.first; i != d.second; i++) {
+    auto def = i->second;
+
+    if (def.op() == spv::OpDecorate && member < 0
+     && spv::Decoration(def.arg(2u)) == decoration)
+      return def.arg(3u);
+    else if (def.op() == spv::OpMemberDecorate && def.arg(2u) == uint32_t(member)
+     && spv::Decoration(def.arg(3u)) == decoration)
+      return def.arg(4u);
+  }
+
+  return std::nullopt;
+}
+
+
 bool SpirvBuilder::canEmitDeclaration(
   const SpirvInstructionBuilder&      ins,
   const std::unordered_set<uint32_t>& emitted) {
