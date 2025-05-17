@@ -2003,17 +2003,25 @@ private:
     if (std::exchange(m_emittedTypes, true))
       return;
 
+    uint32_t uintType = m_builder.defVectorType(VK_COMPONENT_TYPE_UINT32_KHR, 0u);
+
     for (auto& e : m_coopmatTypes) {
       e.second.vectorTypeId = m_builder.defVectorType(e.second.scalarType, e.second.vectorSize);
+
+      /* RADV doesn't always manage to keep vectors together, so
+       * pack everything into dwords explicitly to help out. */
+      if (e.second.vectorSize > 1u)
+        e.second.elementTypeId = uintType;
+      else
+        e.second.elementTypeId = e.second.vectorTypeId;
 
       /* Declare array type */
       SpirvInstructionBuilder arr(spv::OpTypeArray);
       arr.add(0u);
-      arr.add(e.second.vectorTypeId);
+      arr.add(e.second.elementTypeId);
       arr.add(m_builder.defConstUint32(e.second.arraySize));
 
       e.second.arrayTypeId = m_builder.defType(arr);
-      e.second.elementTypeId = e.second.vectorTypeId;
 
       /* Declare struct type */
       SpirvInstructionBuilder typeIns(spv::OpTypeStruct, 0u, e.first);
