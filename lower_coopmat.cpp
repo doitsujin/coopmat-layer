@@ -83,6 +83,263 @@ struct CoopmatType {
 
 
 /**
+ * \brief Cooperative matrix builder
+ *
+ * Convenience class to assemble cooperative matrix structs
+ * from scalar or vector components.
+ */
+class CoopmatBuilder {
+
+public:
+
+  CoopmatBuilder(SpirvBuilder& builder, CoopmatType type)
+  : m_builder(builder), m_type(type) { }
+
+  /**
+   * \brief Records instruction
+   *
+   * Emits the final build instruction.
+   * \returns Cooperative matrix ID
+   */
+  uint32_t finalize() {
+    return m_builder.op(spv::OpCompositeConstruct, m_type.typeId,
+      m_builder.addIns(getArrayOp()));
+  }
+
+  /**
+   * \brief Adds a scalar element
+   *
+   * Constructs intermediate vectors as necessary.
+   * \param [in] id Scalar ID
+   */
+  void addScalar(uint32_t id) {
+    if (m_type.vectorSize > 1u) {
+      auto& op = getVectorOp();
+      op.add(id);
+
+      if (op.len() == 3u + m_type.vectorSize) {
+        addVector(m_builder.addIns(op));
+        op = SpirvInstructionBuilder();
+      }
+    } else {
+      getArrayOp().add(id);
+    }
+  }
+
+
+  /**
+   * \brief Adds a vector element
+   *
+   * There must not be any incomplete vectors from
+   * scalar elements present when calling this.
+   * Can be any size-compatible type.
+   * \param [in] id Vector ID
+   */
+  void addVector(uint32_t id) {
+    getArrayOp().add(m_builder.bitcast(m_type.vectorTypeId, id));
+  }
+
+
+  /**
+   * \brief Creates constant vector
+   *
+   * \param [in] id Scalar ID
+   * \returns Vector with the replicated scalar
+   */
+  uint32_t makeVector(uint32_t id) {
+    if (m_type.vectorSize > 1u) {
+      SpirvInstructionBuilder op(spv::OpCompositeConstruct, m_type.vectorTypeId, m_builder.allocId());
+
+      for (uint32_t i = 0u; i < m_type.vectorSize; i++)
+        op.add(id);
+
+      return m_builder.addIns(op);
+    } else {
+      return id;
+    }
+  }
+
+private:
+
+  SpirvBuilder& m_builder;
+  CoopmatType   m_type;
+
+  SpirvInstructionBuilder m_arrayOp;
+  SpirvInstructionBuilder m_vectorOp;
+
+  SpirvInstructionBuilder& getArrayOp() {
+    if (!m_arrayOp.id())
+      m_arrayOp = SpirvInstructionBuilder(spv::OpCompositeConstruct, m_type.arrayTypeId, m_builder.allocId());
+
+    return m_arrayOp;
+  }
+
+  SpirvInstructionBuilder& getVectorOp() {
+    if (!m_vectorOp.id())
+      m_vectorOp = SpirvInstructionBuilder(spv::OpCompositeConstruct, m_type.vectorTypeId, m_builder.allocId());
+
+    return m_vectorOp;
+  }
+
+};
+
+
+/**
+ * \brief Cooperative matrix accessor
+ *
+ * Convenience class access individual vectors or components of a
+ * cooperative matrix that is provided by ID.
+ */
+class CoopmatObject {
+
+public:
+
+  CoopmatObject(SpirvBuilder& builder, CoopmatType type, uint32_t id)
+  : m_builder(builder), m_type(type), m_id(id) { }
+
+  /**
+   * \brief Extracts a scalar component
+   *
+   * \param [in] index Scalar element index
+   * \returns Scalar ID
+   */
+  uint32_t extractScalar(uint32_t index) const {
+    if (m_type.vectorSize > 1u) {
+      uint32_t vectorId = extractVector(index / m_type.vectorSize);
+      return m_builder.op(spv::OpCompositeExtract, m_type.scalarTypeId,
+        vectorId, index % m_type.vectorSize);
+    } else {
+      return extractVector(index);
+    }
+  }
+
+  /**
+   * \brief Extracts a vector component
+   *
+   * \param [in] index Vector index
+   * \returns Vector ID
+   */
+  uint32_t extractVector(uint32_t index) const {
+    return m_builder.op(spv::OpCompositeExtract, m_type.vectorTypeId, m_id, 0u, index);
+  }
+
+  /**
+   * \brief Inserts a scalar component
+   *
+   * \param [in] index Vector index
+   * \param [in] id Vector ID
+   * \returns New cooperative matrix ID
+   */
+  uint32_t insertScalar(uint32_t index, uint32_t id) {
+    if (m_type.vectorSize > 1u) {
+      uint32_t vectorId = extractVector(index / m_type.vectorSize);
+      vectorId = m_builder.op(spv::OpCompositeInsert, m_type.vectorTypeId, id, vectorId, index % m_type.vectorSize);
+      return insertVector(index / m_type.vectorSize, vectorId);
+    } else {
+      return insertVector(index, id);
+    }
+  }
+
+  /**
+   * \brief Inserts a vector component
+   *
+   * \param [in] index Vector index
+   * \param [in] id Vector ID
+   * \returns New cooperative matrix ID
+   */
+  uint32_t insertVector(uint32_t index, uint32_t id) {
+    return m_id = m_builder.op(spv::OpCompositeInsert, m_type.typeId,
+      m_builder.bitcast(m_type.vectorTypeId, id), m_id, 0u, index);
+  }
+
+private:
+
+  SpirvBuilder& m_builder;
+  CoopmatType   m_type;
+  uint32_t      m_id;
+
+};
+
+
+/**
+ * \brief Cooperative matrix memory object acessor
+ *
+ * Provides convenience methods to load and store elements from or
+ * to a cooperative matrix variable or memory object.
+ */
+class CoopmatVariable {
+
+public:
+
+  CoopmatVariable(SpirvBuilder& builder, CoopmatType type, uint32_t id)
+  : m_builder(builder), m_type(type), m_id(id),
+    m_storageClass(builder.getTypeInfo(builder.getOperandTypeId(id)).storageClass) { }
+
+  uint32_t id() const {
+    return m_id;
+  }
+
+  /**
+   * \brief Loads scalar from memory object
+   *
+   * \param [in] indexId Scalar ID
+   * \returns Scalar value ID
+   */
+  uint32_t loadScalar(uint32_t indexId) const {
+    uint32_t uintType = m_builder.defVectorType(VK_COMPONENT_TYPE_UINT32_KHR, 0u);
+
+    /* Check if the index is constant, and use constants
+     * to index into the object if so. */
+    auto indexConst = m_builder.evaluateConstant(indexId);
+
+    uint32_t vectorIndexId = indexId;
+
+    if (m_type.vectorSize > 1u) {
+      if (indexConst)
+        vectorIndexId = m_builder.defConstUint32(indexConst.value() / m_type.vectorSize);
+      else
+        vectorIndexId = m_builder.op(spv::OpUDiv, uintType, indexId, m_builder.defConstUint32(m_type.vectorSize));
+    }
+
+    uint32_t resultId = loadVector(vectorIndexId);
+
+    if (m_type.vectorSize > 1u) {
+      if (indexConst) {
+        resultId = m_builder.op(spv::OpCompositeExtract, m_type.scalarTypeId, resultId, indexConst.value() % m_type.vectorSize);
+      } else {
+        uint32_t scalarIndexId = m_builder.op(spv::OpUMod, uintType, indexId, m_builder.defConstUint32(m_type.vectorSize));
+        resultId = m_builder.op(spv::OpVectorExtractDynamic, m_type.scalarTypeId, resultId, scalarIndexId);
+      }
+    }
+
+    return resultId;
+  }
+
+  /**
+   * \brief Loads vector from memory object
+   *
+   * \param [in] indexId Vector index ID
+   * \returns Vector value ID
+   */
+  uint32_t loadVector(uint32_t indexId) const {
+    uint32_t accessChain = m_builder.op(spv::OpAccessChain,
+      m_builder.defPointerType(m_type.vectorTypeId, m_storageClass),
+      m_id, m_builder.defConstUint32(0u), indexId);
+
+    return m_builder.op(spv::OpLoad, m_type.vectorTypeId, accessChain);
+  }
+
+private:
+
+  SpirvBuilder&     m_builder;
+  CoopmatType       m_type;
+  uint32_t          m_id;
+  spv::StorageClass m_storageClass;
+
+};
+
+
+/**
  * \brief Generic function builder map
  *
  * Used to build dedicated SPIR-V functions for any given cooperative
@@ -212,24 +469,13 @@ struct CoopmatFillFn {
     /* Load scalar and put it into a vector as necessary */
     uint32_t elementId = mod.op(spv::OpLoad, type->scalarTypeId, paramId);
 
-    if (type->vectorSize > 1u) {
-      SpirvInstructionBuilder vectorOp(spv::OpCompositeConstruct, type->vectorTypeId, mod.allocId());
-
-      for (uint32_t i = 0u; i < type->vectorSize; i++)
-        vectorOp.add(elementId);
-
-      elementId = mod.addIns(vectorOp);
-    }
-
-    /* Create the actual array */
-    SpirvInstructionBuilder arrayOp(spv::OpCompositeConstruct, type->arrayTypeId, mod.allocId());
+    CoopmatBuilder result(mod, *type);
+    elementId = result.makeVector(elementId);
 
     for (uint32_t i = 0u; i < type->arraySize; i++)
-      arrayOp.add(elementId);
+      result.addVector(elementId);
 
-    uint32_t resultId = mod.op(spv::OpCompositeConstruct, type->typeId, mod.addIns(arrayOp));
-
-    mod.op(spv::OpReturnValue, resultId);
+    mod.op(spv::OpReturnValue, result.finalize());
     mod.op(spv::OpFunctionEnd, 0u);
 
     std::stringstream name;
@@ -276,34 +522,21 @@ struct CoopmatScaleFn {
     /* Load factor and extend to an integer vector as necessary */
     uint32_t factorId = mod.op(spv::OpLoad, type->scalarTypeId, scalarId);
 
-    if (type->vectorSize > 1u) {
-      SpirvInstructionBuilder vectorOp(spv::OpCompositeConstruct, type->vectorTypeId, mod.allocId());
+    CoopmatBuilder result(mod, *type);
+    factorId = result.makeVector(factorId);
 
-      for (uint32_t i = 0u; i < type->vectorSize; i++)
-        vectorOp.add(factorId);
-
-      factorId = mod.addIns(vectorOp);
-    }
-
-    /* Instruction to assemble the final array */
-    SpirvInstructionBuilder arrayOp(spv::OpCompositeConstruct, type->arrayTypeId, mod.allocId());
+    CoopmatVariable input(mod, *type, matrixId);
 
     for (uint32_t i = 0u; i < type->arraySize; i++) {
-      uint32_t accessChain = mod.op(spv::OpAccessChain,
-        mod.defPointerType(type->vectorTypeId, spv::StorageClassFunction),
-        matrixId, mod.defConstUint32(0u), mod.defConstUint32(i));
-
-      uint32_t elementId = mod.op(spv::OpLoad, type->vectorTypeId, accessChain);
+      uint32_t elementId = input.loadVector(mod.defConstUint32(i));
 
       spv::Op opcode = util::isFloatType(type->scalarType) ? spv::OpFMul : spv::OpIMul;
       elementId = mod.op(opcode, type->vectorTypeId, elementId, factorId);
 
-      arrayOp.add(elementId);
+      result.addVector(elementId);
     }
 
-    uint32_t resultId = mod.op(spv::OpCompositeConstruct, type->typeId, mod.addIns(arrayOp));
-
-    mod.op(spv::OpReturnValue, resultId);
+    mod.op(spv::OpReturnValue, result.finalize());
     mod.op(spv::OpFunctionEnd, 0u);
 
     std::stringstream name;
@@ -344,42 +577,18 @@ struct CoopmatConvertFn {
 
     mod.op(spv::OpLabel, 0u);
 
-    /* Instructions to assemble appropriate array type */
-    SpirvInstructionBuilder arrayOp(spv::OpCompositeConstruct, dstType->arrayTypeId, mod.allocId());
-    SpirvInstructionBuilder vectorOp;
+    CoopmatBuilder result(mod, *dstType);
+    CoopmatVariable input(mod, *srcType, paramId);
 
     for (uint32_t i = 0u; i < dstType->length; i++) {
       /* Load and convert one scalar at a time */
-      SpirvInstructionBuilder accessChainOp(spv::OpAccessChain,
-        mod.defPointerType(srcType->scalarTypeId, spv::StorageClassFunction),
-        mod.allocId());
-      accessChainOp.add(paramId);
-      accessChainOp.add(mod.defConstUint32(0u));
-      accessChainOp.add(mod.defConstUint32(i / srcType->vectorSize));
-
-      if (srcType->vectorSize > 1u)
-        accessChainOp.add(mod.defConstUint32(i % srcType->vectorSize));
-
-      uint32_t scalarId = mod.op(spv::OpLoad, srcType->scalarTypeId, mod.addIns(accessChainOp));
+      uint32_t scalarId = input.loadScalar(mod.defConstUint32(i));
       scalarId = mod.op(opcode, dstType->scalarTypeId, scalarId);
 
-      /* Build destination vectors */
-      if (dstType->vectorSize > 1u) {
-        if (!(i % dstType->vectorSize))
-          vectorOp = SpirvInstructionBuilder(spv::OpCompositeConstruct, dstType->vectorTypeId, mod.allocId());
-
-        vectorOp.add(scalarId);
-
-        if (!((i + 1u) % dstType->vectorSize))
-          arrayOp.add(mod.addIns(vectorOp));
-      } else {
-        arrayOp.add(scalarId);
-      }
+      result.addScalar(scalarId);
     }
 
-    uint32_t resultId = mod.op(spv::OpCompositeConstruct, dstType->typeId, mod.addIns(arrayOp));
-
-    mod.op(spv::OpReturnValue, resultId);
+    mod.op(spv::OpReturnValue, result.finalize());
     mod.op(spv::OpFunctionEnd, 0u);
 
     std::stringstream name;
@@ -425,15 +634,12 @@ struct CoopmatTransposeBlockFn {
     uint32_t laneId = mod.op(spv::OpLoad, uintType, laneIdVar);
 
     /* Instruction to build output array */
-    SpirvInstructionBuilder arrayOp(spv::OpCompositeConstruct, type->arrayTypeId, mod.allocId());
+    CoopmatBuilder result(mod, *type);
+    CoopmatVariable input(mod, *type, paramId);
 
     for (uint32_t i = 0u; i < type->arraySize; i++) {
-      uint32_t accessChainId = mod.op(spv::OpAccessChain,
-        mod.defPointerType(type->vectorTypeId, spv::StorageClassFunction),
-        paramId, mod.defConstUint32(0u), mod.defConstUint32(i));
-
       /* Transpose 2x2 blocks first, then 4x4 */
-      uint32_t elementId = mod.op(spv::OpLoad, type->vectorTypeId, accessChainId);
+      uint32_t elementId = input.loadVector(mod.defConstUint32(i));
 
       for (uint32_t j = 1u; j < type->vectorSize; j <<= 1u) {
         uint32_t shuffleId = mod.op(spv::OpGroupNonUniformShuffleXor, type->vectorTypeId,
@@ -460,12 +666,10 @@ struct CoopmatTransposeBlockFn {
           isHiId, mod.addIns(hiOp), mod.addIns(loOp));
       }
 
-      arrayOp.add(elementId);
+      result.addVector(elementId);
     }
 
-    uint32_t resultId = mod.op(spv::OpCompositeConstruct, type->typeId, mod.addIns(arrayOp));
-
-    mod.op(spv::OpReturnValue, resultId);
+    mod.op(spv::OpReturnValue, result.finalize());
     mod.op(spv::OpFunctionEnd, 0u);
 
     std::stringstream name;
@@ -624,13 +828,13 @@ struct CoopmatMulAddFn {
     /* Declare function */
     uint32_t funcId = mod.op(spv::OpFunction, dType->typeId, 0u, mod.defType(typeIns));
 
-    uint32_t aId = mod.op(spv::OpFunctionParameter, aParamType);
-    uint32_t bId = mod.op(spv::OpFunctionParameter, bParamType);
-    uint32_t cId = mod.op(spv::OpFunctionParameter, cParamType);
+    CoopmatVariable a(mod, *aType, mod.op(spv::OpFunctionParameter, aParamType));
+    CoopmatVariable b(mod, *bType, mod.op(spv::OpFunctionParameter, bParamType));
+    CoopmatVariable c(mod, *cType, mod.op(spv::OpFunctionParameter, cParamType));
 
-    mod.setDebugName(aId, "a");
-    mod.setDebugName(bId, "b");
-    mod.setDebugName(cId, "c");
+    mod.setDebugName(a.id(), "a");
+    mod.setDebugName(b.id(), "b");
+    mod.setDebugName(c.id(), "c");
 
     mod.op(spv::OpLabel, 0u);
 
@@ -664,8 +868,7 @@ struct CoopmatMulAddFn {
     std::vector<uint32_t> registerRows(dType->unitCountPerRegister);
 
     /* Instructions to create resulting vector array */
-    SpirvInstructionBuilder arrayOp(spv::OpCompositeConstruct, dType->arrayTypeId, mod.allocId());
-    SpirvInstructionBuilder vectorOp;
+    CoopmatBuilder d(mod, *dType);
 
     for (uint32_t baseRow = 0u; baseRow < dType->length; baseRow++) {
       /* The following code largely assumes that all matrices are square, and thus of the
@@ -678,8 +881,8 @@ struct CoopmatMulAddFn {
         uint32_t rowResultId = 0u;
 
         for (uint32_t iter = 0u; iter < aType->arraySize; iter++) {
-          uint32_t aElements = emitLoadAMatrix(mod, aId, iter, rowIndex, laneId, aAsSigned);
-          uint32_t bElements = emitLoadBMatrix(mod, bId, iter, bAsSigned);
+          uint32_t aElements = emitLoadAMatrix(mod, a, iter, rowIndex, laneId, aAsSigned);
+          uint32_t bElements = emitLoadBMatrix(mod, b, iter, bAsSigned);
 
           if (util::isFloatType(aType->scalarType)) {
             /* Multiply as-is, then accumulate using the destination type. If applicable,
@@ -729,29 +932,17 @@ struct CoopmatMulAddFn {
       }
 
       /* Load accumulator and accumulate */
-      uint32_t accumId = emitLoadCMatrix(mod, cId, baseRow);
+      uint32_t accumId = emitLoadCMatrix(mod, c, baseRow);
       accumId = mod.convert(intermediateTypeId, accumId);
 
       spv::Op addOp = util::isFloatType(dType->scalarType) ? spv::OpFAdd : spv::OpIAdd;
       accumId = mod.op(addOp, intermediateTypeId, accumId, registerRows.at(0));
       accumId = mod.convert(dType->scalarTypeId, accumId);
 
-      if (dType->vectorSize > 1u) {
-        if (!(baseRow & dType->vectorSize))
-          vectorOp = SpirvInstructionBuilder(spv::OpCompositeConstruct, dType->vectorTypeId, mod.allocId());
-
-        vectorOp.add(accumId);
-
-        if (!((baseRow + 1u) & dType->vectorSize))
-          arrayOp.add(mod.addIns(vectorOp));
-      } else {
-        arrayOp.add(accumId);
-      }
+      d.addScalar(accumId);
     }
 
-    uint32_t resultId = mod.op(spv::OpCompositeConstruct, dType->typeId, mod.addIns(arrayOp));
-
-    mod.op(spv::OpReturnValue, resultId);
+    mod.op(spv::OpReturnValue, d.finalize());
     mod.op(spv::OpFunctionEnd, 0u);
 
     std::stringstream name;
@@ -771,15 +962,9 @@ struct CoopmatMulAddFn {
 
 
 
-  uint32_t emitLoadAMatrix(SpirvBuilder& mod, uint32_t varId, uint32_t index, uint32_t row, uint32_t laneId, bool isSigned) const {
+  uint32_t emitLoadAMatrix(SpirvBuilder& mod, const CoopmatVariable& a, uint32_t index, uint32_t row, uint32_t laneId, bool isSigned) const {
     uint32_t uintType = mod.defVectorType(VK_COMPONENT_TYPE_UINT32_KHR, 0u);
-
-    uint32_t accessChain = mod.op(spv::OpAccessChain,
-      mod.defPointerType(aType->vectorTypeId, spv::StorageClassFunction), varId,
-      mod.defConstUint32(0u),
-      mod.defConstUint32(index));
-
-    uint32_t resultId = mod.op(spv::OpLoad, aType->vectorTypeId, accessChain);
+    uint32_t resultId = a.loadVector(mod.defConstUint32(index));
 
     /* Clustered broadcast */
     if (aType->unitCountPerRegister > 1u) {
@@ -800,31 +985,15 @@ struct CoopmatMulAddFn {
   }
 
 
-  uint32_t emitLoadBMatrix(SpirvBuilder& mod, uint32_t varId, uint32_t index, bool isSigned) const {
-    uint32_t accessChain = mod.op(spv::OpAccessChain,
-      mod.defPointerType(bType->vectorTypeId, spv::StorageClassFunction), varId,
-      mod.defConstUint32(0u),
-      mod.defConstUint32(index));
-
+  uint32_t emitLoadBMatrix(SpirvBuilder& mod, const CoopmatVariable& b, uint32_t index, bool isSigned) const {
     /* B is already in the correct layout */
-    uint32_t resultId = mod.op(spv::OpLoad, aType->vectorTypeId, accessChain);
+    uint32_t resultId = b.loadVector(mod.defConstUint32(index));
     return emitCastInput(mod, resultId, bType, isSigned);
   }
 
 
-  uint32_t emitLoadCMatrix(SpirvBuilder& mod, uint32_t varId, uint32_t row) const {
-    /* Load a scalar */
-    uint32_t ptrTypeId = mod.defPointerType(cType->scalarTypeId, spv::StorageClassFunction);
-    SpirvInstructionBuilder accessChainOp(spv::OpAccessChain, ptrTypeId, mod.allocId());
-    accessChainOp.add(varId);
-    accessChainOp.add(mod.defConstUint32(0u));
-    accessChainOp.add(mod.defConstUint32(row / cType->vectorSize));
-
-    if (cType->vectorSize > 1u)
-      accessChainOp.add(mod.defConstUint32(row % cType->vectorSize));
-
-    /* Return accumulator as-is, we will cast it as necessary */
-    return mod.op(spv::OpLoad, cType->scalarTypeId, mod.addIns(accessChainOp));
+  uint32_t emitLoadCMatrix(SpirvBuilder& mod, const CoopmatVariable& c, uint32_t row) const {
+    return c.loadScalar(mod.defConstUint32(row));
   }
 
 
@@ -937,10 +1106,10 @@ public:
           type.scalarTypeId = ins.arg(2u);
           type.vectorSize = sizeof(uint32_t) / util::getComponentSize(type.scalarType);
           type.vectorTypeId = 0u; /* allocated later */
-          type.rows = m_builder.evaluateConstant(ins.arg(4u));
-          type.cols = m_builder.evaluateConstant(ins.arg(5u));
+          type.rows = m_builder.evaluateConstant(ins.arg(4u)).value();
+          type.cols = m_builder.evaluateConstant(ins.arg(5u)).value();
           type.length = std::max(1u, (type.rows * type.cols) / m_subgroupSize);
-          type.use = spv::CooperativeMatrixUse(m_builder.evaluateConstant(ins.arg(6u)));
+          type.use = spv::CooperativeMatrixUse(m_builder.evaluateConstant(ins.arg(6u)).value());
           type.layout = type.use == spv::CooperativeMatrixUseMatrixAKHR
             ? spv::CooperativeMatrixLayoutColumnMajorKHR
             : spv::CooperativeMatrixLayoutRowMajorKHR;
@@ -1087,9 +1256,9 @@ public:
           auto* matrixType = findCoopmatType(ins.arg(1u));
 
           auto [srcArray, srcOffset, srcStride] = rewriteCoopmatLoadStoreAccessChain(ins.arg(3u), ins.arg(5u));
-          auto layout = spv::CooperativeMatrixLayout(m_builder.evaluateConstant(ins.arg(4u)));
+          auto layout = spv::CooperativeMatrixLayout(m_builder.evaluateConstant(ins.arg(4u)).value());
 
-          SpirvInstructionBuilder arrayOp(spv::OpCompositeConstruct, matrixType->arrayTypeId, m_builder.allocId());
+          CoopmatBuilder result(m_builder, *matrixType);
 
           std::vector<uint32_t> operands;
 
@@ -1102,7 +1271,7 @@ public:
             uint32_t id = loadMatrixElement(matrixType, layout,
               srcArray, srcOffset, coord, srcStride, operands.size(), operands.data());
 
-            arrayOp.add(id);
+            result.addVector(id);
           }
 
           /* If no repacking is needed, construct directly into provided result ID */
@@ -1115,19 +1284,22 @@ public:
             repackFn = m_functions.get(fnInfo, m_builder, defLaneId());
           }
 
-          SpirvInstructionBuilder constructOp(spv::OpCompositeConstruct,
-            matrixType->typeId, repackFn ? m_builder.allocId() : ins.arg(2u));
-          constructOp.add(m_builder.addIns(arrayOp));
-          m_builder.addIns(constructOp);
+          uint32_t resultId = result.finalize();
 
           if (repackFn) {
-            uint32_t paramId = m_builder.wrap(matrixType->typeId, constructOp.id());
+            uint32_t paramId = m_builder.wrap(matrixType->typeId, resultId);
 
-            SpirvInstructionBuilder packIns(spv::OpFunctionCall, matrixType->typeId, ins.arg(2u));
-            packIns.add(repackFn);
-            packIns.add(paramId);
+            SpirvInstructionBuilder packOp(spv::OpFunctionCall, matrixType->typeId, ins.arg(2u));
+            packOp.add(repackFn);
+            packOp.add(paramId);
 
-            m_builder.addIns(packIns);
+            m_builder.addIns(packOp);
+          } else {
+            /* Copy object to reuse the original ID */
+            SpirvInstructionBuilder copyOp(spv::OpCopyObject, matrixType->typeId, ins.arg(2u));
+            copyOp.add(resultId);
+
+            m_builder.addIns(copyOp);
           }
         } break;
 
@@ -1151,7 +1323,7 @@ public:
           auto* matrixType = findCoopmatType(m_builder.getOperandTypeId(ins.arg(2u)));
 
           auto [dstArray, dstOffset, dstStride] = rewriteCoopmatLoadStoreAccessChain(ins.arg(1u), ins.arg(4u));
-          auto layout = spv::CooperativeMatrixLayout(m_builder.evaluateConstant(ins.arg(3u)));
+          auto layout = spv::CooperativeMatrixLayout(m_builder.evaluateConstant(ins.arg(3u)).value());
 
           std::vector<uint32_t> operands;
 
@@ -1495,12 +1667,12 @@ private:
     arrayOp.add(m_builder.defVectorType(VK_COMPONENT_TYPE_UINT32_KHR, 0u));
 
     if (def.op() == spv::OpTypeArray) {
-      uint32_t arraySize = m_builder.evaluateConstant(def.arg(3u));
+      auto arraySize = m_builder.evaluateConstant(def.arg(3u));
 
       if (!arraySize)
         return 0u;
 
-      arrayOp.add(m_builder.defConstUint32(arraySize * arrayStride / sizeof(uint32_t)));
+      arrayOp.add(m_builder.defConstUint32(arraySize.value() * arrayStride / sizeof(uint32_t)));
     }
 
     uint32_t arrayId = m_builder.addIns(arrayOp);

@@ -303,9 +303,10 @@ public:
    * \brief Evaluates constant expression
    *
    * \param [in] id ID to evaluate
-   * \returns Constant value as 32-bit integer
+   * \returns Constant value as 32-bit integer, or
+   *    \c nullopt if the expression isn't constant.
    */
-  uint32_t evaluateConstant(
+  std::optional<uint32_t> evaluateConstant(
           uint32_t                      id) const;
 
   /**
