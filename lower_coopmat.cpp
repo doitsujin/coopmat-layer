@@ -558,6 +558,8 @@ struct CoopmatScaleFn {
 struct CoopmatConvertFn {
   const CoopmatType* dstType = nullptr;
   const CoopmatType* srcType = nullptr;
+  uint32_t dstTransposeFn = 0u;
+  uint32_t srcTransposeFn = 0u;
   spv::Op opcode = spv::OpNop;
 
   auto operator <=> (const CoopmatConvertFn&) const = default;
@@ -577,18 +579,35 @@ struct CoopmatConvertFn {
 
     mod.op(spv::OpLabel, 0u);
 
+    /* Load or transpose input matrix */
+    uint32_t matrixId = (dstType->layout != srcType->layout && srcTransposeFn)
+      ? mod.op(spv::OpFunctionCall, srcType->typeId, srcTransposeFn, paramId)
+      : mod.op(spv::OpLoad, srcType->typeId, paramId);
+
+    /* Build matrix of destination type, converting
+     * components as necessary */
     CoopmatBuilder result(mod, *dstType);
-    CoopmatVariable input(mod, *srcType, paramId);
+    CoopmatObject input(mod, *srcType, matrixId);
 
     for (uint32_t i = 0u; i < dstType->length; i++) {
       /* Load and convert one scalar at a time */
-      uint32_t scalarId = input.loadScalar(mod.defConstUint32(i));
-      scalarId = mod.op(opcode, dstType->scalarTypeId, scalarId);
+      uint32_t scalarId = input.extractScalar(i);
+
+      if (opcode != spv::OpNop)
+        scalarId = mod.op(opcode, dstType->scalarTypeId, scalarId);
 
       result.addScalar(scalarId);
     }
 
-    mod.op(spv::OpReturnValue, result.finalize());
+    matrixId = result.finalize();
+
+    /* Transpose output matrix if necessary */
+    if (dstType->layout != srcType->layout && dstTransposeFn && !srcTransposeFn) {
+      matrixId = mod.op(spv::OpFunctionCall, dstType->typeId,
+        dstTransposeFn, mod.wrap(dstType->typeId, matrixId));
+    }
+
+    mod.op(spv::OpReturnValue, matrixId);
     mod.op(spv::OpFunctionEnd, 0u);
 
     std::stringstream name;
@@ -674,6 +693,120 @@ struct CoopmatTransposeBlockFn {
 
     std::stringstream name;
     name << type->name << "_Transpose" << type->vectorSize << "x" << type->vectorSize;
+
+    mod.setDebugName(funcId, name.str());
+    return funcId;
+  }
+};
+
+
+/**
+ * \brief Transpose function builder
+ *
+ * Transposes the entire matrix, using the block-transpose
+ * functions for individual vectors where applicable.
+ */
+struct CoopmatTransposeMatrixFn {
+  const CoopmatType* type = nullptr;
+
+  auto operator <=> (const CoopmatTransposeMatrixFn&) const = default;
+
+  uint32_t build(SpirvBuilder& mod, uint32_t blockTransposeFn, uint32_t laneIdVar) const {
+    /* Use block-transpose function directly if we only have one array element since
+     * that is equivalent to a full transpose with our matrix layout. */
+    if (type->arraySize == 1u)
+      return blockTransposeFn;
+
+    uint32_t uintType = mod.defVectorType(VK_COMPONENT_TYPE_UINT32_KHR, 0u);
+    uint32_t paramType = mod.defPointerType(type->typeId, spv::StorageClassFunction);
+
+    SpirvInstructionBuilder typeIns(spv::OpTypeFunction);
+    typeIns.add(0u);
+    typeIns.add(type->typeId);
+    typeIns.add(paramType);
+
+    /* Declare function */
+    uint32_t funcId = mod.op(spv::OpFunction, type->typeId, 0u, mod.defType(typeIns));
+    uint32_t paramId = mod.op(spv::OpFunctionParameter, paramType);
+    mod.setDebugName(paramId, "self");
+    mod.op(spv::OpLabel, 0u);
+
+    uint32_t laneId = mod.op(spv::OpLoad, uintType, laneIdVar);
+
+    uint32_t matrixId = blockTransposeFn
+      ? mod.op(spv::OpFunctionCall, type->typeId, blockTransposeFn, paramId)
+      : mod.op(spv::OpLoad, type->typeId, paramId);
+
+    /* Extract individual vectors so we can iterate over them multiple times */
+    std::vector<uint32_t> regs(type->arraySize);
+
+    for (uint32_t r = 0u; r < type->arraySize; r++) {
+      CoopmatObject input(mod, *type, matrixId);
+      regs[r] = input.extractVector(r);
+    }
+
+    /* Iterate over each register and transpose. If each register stores multiple
+     * rows or columns, those will automatically be in the correct order. */
+    for (uint32_t i = 1u; i < type->arraySize; i <<= 1u) {
+      uint32_t distanceId = mod.defConstUint32(i * type->vectorSize);
+
+      uint32_t selectorId = mod.op(spv::OpINotEqual, mod.defBoolType(0u),
+        mod.op(spv::OpBitwiseAnd, uintType, laneId, distanceId),
+        mod.defConstUint32(0u));
+
+      for (uint32_t r = 0u; r < type->arraySize; r++) {
+        /* Skip registers we already processed */
+        if (r & i)
+          continue;
+
+        auto& loId = regs.at(r);
+        auto& hiId = regs.at(r | i);
+
+        uint32_t loIdShuffle = mod.op(spv::OpGroupNonUniformShuffleXor, type->vectorTypeId,
+          mod.defConstUint32(uint32_t(spv::ScopeSubgroup)), loId, distanceId);
+        uint32_t hiIdShuffle = mod.op(spv::OpGroupNonUniformShuffleXor, type->vectorTypeId,
+          mod.defConstUint32(uint32_t(spv::ScopeSubgroup)), hiId, distanceId);
+
+        loId = mod.op(spv::OpSelect, type->vectorTypeId, selectorId, hiIdShuffle, loId);
+        hiId = mod.op(spv::OpSelect, type->vectorTypeId, selectorId, hiId, loIdShuffle);
+      }
+    }
+
+    /* Finally, get the blocks within each register into the correct order */
+    if (type->unitCountPerRegister > 1u) {
+      uint32_t matrixLengthBits = util::tzcnt(type->length);
+
+      uint32_t unitCountBits = util::tzcnt(type->unitCountPerRegister);
+      uint32_t unitLengthBits = util::tzcnt(type->unitLength);
+
+      uint32_t unitId = mod.op(spv::OpShiftRightLogical, uintType, laneId, mod.defConstUint32(matrixLengthBits));
+      uint32_t blockId = mod.op(spv::OpShiftRightLogical, uintType, laneId, mod.defConstUint32(unitLengthBits));
+
+      uint32_t sourceId = mod.op(spv::OpBitFieldInsert, uintType, laneId, blockId,
+        mod.defConstUint32(matrixLengthBits),
+        mod.defConstUint32(unitLengthBits - matrixLengthBits));
+
+      sourceId = mod.op(spv::OpBitFieldInsert, uintType, sourceId, unitId,
+        mod.defConstUint32(unitLengthBits),
+        mod.defConstUint32(32u - unitLengthBits));
+
+      for (uint32_t r = 0u; r < type->arraySize; r++) {
+        regs.at(r) = mod.op(spv::OpGroupNonUniformShuffle, type->vectorTypeId,
+          mod.defConstUint32(uint32_t(spv::ScopeSubgroup)), regs.at(r), sourceId);
+      }
+    }
+
+    /* Build final object */
+    CoopmatBuilder result(mod, *type);
+
+    for (auto r : regs)
+      result.addVector(r);
+
+    mod.op(spv::OpReturnValue, result.finalize());
+    mod.op(spv::OpFunctionEnd, 0u);
+
+    std::stringstream name;
+    name << type->name << "_Transpose";
 
     mod.setDebugName(funcId, name.str());
     return funcId;
@@ -1050,6 +1183,7 @@ using CoopmatFunctions = CoopmatFunctionSet<
   CoopmatScaleFn,
   CoopmatConvertFn,
   CoopmatTransposeBlockFn,
+  CoopmatTransposeMatrixFn,
   CoopmatLayoutFn,
   CoopmatMulAddFn>;
 
