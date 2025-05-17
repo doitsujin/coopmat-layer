@@ -459,7 +459,18 @@ public:
    */
   uint32_t convert(
           uint32_t                      dstTypeId,
-          uint32_t                      srcTypeId,
+          uint32_t                      operandId);
+
+  /**
+   * \brief Emits arbitrary type bitcasting
+   *
+   * Omits the instruction if both types are the same.
+   * \param [in] dstTypeId Type to convert to
+   * \param [in] operandId Operand to convert
+   * \returns Converted operand
+   */
+  uint32_t bitcast(
+          uint32_t                      dstTypeId,
           uint32_t                      operandId);
 
   /**
