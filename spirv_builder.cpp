@@ -353,10 +353,8 @@ std::optional<uint32_t> SpirvBuilder::evaluateConstant(
         uint32_t                      id) const {
   auto entry = m_declarations.find(id);
 
-  if (entry == m_declarations.end()) {
-    std::cerr << "Unknown declaration " << id << std::endl;
-    return 0u;
-  }
+  if (entry == m_declarations.end())
+    return std::nullopt;
 
   const auto& expr = entry->second;
 
