@@ -490,6 +490,15 @@ public:
           int32_t                       member,
           spv::Decoration               decoration) const;
 
+  /**
+   * \brief Queries debug name for an object
+   *
+   * \param [in] id Object ID
+   * \returns Debug name, if any
+   */
+  std::string getName(
+          uint32_t                      id) const;
+
 private:
 
   SpirvHeader                           m_header;
