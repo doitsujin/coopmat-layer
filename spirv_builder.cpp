@@ -349,7 +349,7 @@ void SpirvBuilder::pushFunctionCode(
   }
 }
 
-uint32_t SpirvBuilder::evaluateConstant(
+std::optional<uint32_t> SpirvBuilder::evaluateConstant(
         uint32_t                      id) const {
   auto entry = m_declarations.find(id);
 
@@ -361,14 +361,14 @@ uint32_t SpirvBuilder::evaluateConstant(
   const auto& expr = entry->second;
 
   switch (expr.op()) {
-    case spv::OpConstantNull:   return 0u;
-    case spv::OpConstantFalse:  return 0u;
-    case spv::OpConstantTrue:   return 1u;
-    case spv::OpConstant:       return expr.arg(3u);
+    case spv::OpConstantNull:   return uint32_t(0u);
+    case spv::OpConstantFalse:  return uint32_t(0u);
+    case spv::OpConstantTrue:   return uint32_t(1u);
+    case spv::OpConstant:       return uint32_t(expr.arg(3u));
 
     default:
       std::cerr << "Unhandled constant instruction " << uint32_t(expr.op()) << ": " << spv::OpToString(expr.op()) << std::endl;
-      return 0u;
+      return std::nullopt;
   }
 }
 
@@ -456,7 +456,7 @@ SpirvTypeInfo SpirvBuilder::getTypeInfo(
       }
 
       if (ins.op() == spv::OpTypeArray)
-        result.arraySize = evaluateConstant(ins.arg(3u));
+        result.arraySize = evaluateConstant(ins.arg(3u)).value_or(0u);
       return result;
     }
 
@@ -690,7 +690,7 @@ uint32_t SpirvBuilder::getMemberTypeId(
       return getMemberTypeId(ins.arg(3u), indexId);
 
     case spv::OpTypeStruct:
-      return ins.arg(2u + evaluateConstant(indexId));
+      return ins.arg(2u + evaluateConstant(indexId).value());
 
     default:
       /* Unknown / scalar type */
