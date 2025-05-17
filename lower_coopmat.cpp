@@ -1353,7 +1353,7 @@ public:
 
           for (uint32_t i = 0u; i < matrixType->arraySize; i++) {
             uint32_t coord = computeMemoryLocation(matrixType, i, layout);
-            uint32_t elementId = m_builder.op(spv::OpCompositeExtract, matrixType->vectorTypeId, id, 0u, i);
+            uint32_t elementId = m_builder.op(spv::OpCompositeExtract, matrixType->elementTypeId, id, 0u, i);
 
             storeMatrixElement(matrixType, layout, elementId,
               dstArray, dstOffset, coord, dstStride, operands.size(), operands.data());
@@ -1715,6 +1715,7 @@ private:
   uint32_t loadMatrixElement(const CoopmatType* type, spv::CooperativeMatrixLayout layout,
       SpirvInstructionBuilder base, uint32_t offsetId, uint32_t coordId, uint32_t strideId,
       uint32_t operandCount, const uint32_t* operands) {
+    auto matTypeInfo = m_builder.getTypeInfo(type->elementTypeId);
     auto [memTypeId, memTypeInfo] = getMemoryLocationTypeInfo(base.typeId());
 
     if (!strideId)
@@ -1731,8 +1732,8 @@ private:
 
     /* Compute number of memory scalars per packed vector. Assume that the
      * underlying memory scalar type is not larger than a packed vector. */
-    uint32_t matScalarSize = util::getComponentSize(type->scalarType);
-    uint32_t matVectorSize = matScalarSize * type->vectorSize;
+    uint32_t matScalarSize = util::getComponentSize(matTypeInfo.scalarType);
+    uint32_t matVectorSize = matScalarSize * std::max(1u, matTypeInfo.vectorSize);
 
     uint32_t memScalarsPerVector = matVectorSize / memScalarSize;
 
@@ -1793,24 +1794,25 @@ private:
 
       SpirvInstructionBuilder resultOp;
 
-      if (type->vectorSize > 1u)
-        resultOp = SpirvInstructionBuilder(spv::OpCompositeConstruct, type->vectorTypeId, m_builder.allocId());
+      if (matTypeInfo.vectorSize > 1u)
+        resultOp = SpirvInstructionBuilder(spv::OpCompositeConstruct, type->elementTypeId, m_builder.allocId());
 
       uint32_t resultId = 0u;
 
-      for (uint32_t i = 0u; i < type->vectorSize; i++) {
+      for (uint32_t i = 0u; i < matTypeInfo.vectorSize; i++) {
         SpirvInstructionBuilder vectorOp(spv::OpCompositeConstruct, vectorType, m_builder.allocId());
 
         for (uint32_t j = 0u; j < loadsPerMatScalar; j++)
           vectorOp.add(memScalars.at(i * loadsPerMatScalar + j));
 
-        resultId = m_builder.bitcast(type->scalarTypeId, m_builder.addIns(vectorOp));
+        uint32_t scalarTypeId = matTypeInfo.vectorSize > 1u ? matTypeInfo.baseTypeId : type->elementTypeId;
+        resultId = m_builder.bitcast(scalarTypeId, m_builder.addIns(vectorOp));
 
-        if (type->vectorSize > 1u)
+        if (matTypeInfo.vectorSize > 1u)
           resultOp.add(resultId);
       }
 
-      if (type->vectorSize > 1u)
+      if (matTypeInfo.vectorSize > 1u)
         resultId = m_builder.addIns(resultOp);
 
       return resultId;
@@ -1823,12 +1825,12 @@ private:
         vectorOp.add(memScalars.at(i));
 
       uint32_t resultId = m_builder.addIns(vectorOp);
-      resultId = m_builder.bitcast(type->vectorTypeId, resultId);
+      resultId = m_builder.bitcast(type->elementTypeId, resultId);
 
       return resultId;
     } else {
       /* One memory scalar covers entire matrix vector, bitcast directly. */
-      return m_builder.bitcast(type->vectorTypeId, memScalars.at(0u));
+      return m_builder.bitcast(type->elementTypeId, memScalars.at(0u));
     }
   }
 
@@ -1836,6 +1838,7 @@ private:
   void storeMatrixElement(const CoopmatType* type, spv::CooperativeMatrixLayout layout, uint32_t id,
       const SpirvInstructionBuilder& base, uint32_t offsetId, uint32_t coordId, uint32_t strideId,
       uint32_t operandCount, const uint32_t* operands) {
+    auto matTypeInfo = m_builder.getTypeInfo(m_builder.getOperandTypeId(id));
     auto [memTypeId, memTypeInfo] = getMemoryLocationTypeInfo(base.typeId());
 
     if (!strideId)
@@ -1852,8 +1855,8 @@ private:
 
     /* Compute number of memory scalars per packed vector. Assume that the
      * underlying memory scalar type is not larger than a packed vector. */
-    uint32_t matScalarSize = util::getComponentSize(type->scalarType);
-    uint32_t matVectorSize = matScalarSize * type->vectorSize;
+    uint32_t matScalarSize = util::getComponentSize(matTypeInfo.scalarType);
+    uint32_t matVectorSize = matScalarSize * std::max(1u, matTypeInfo.vectorSize);
 
     uint32_t memScalarsPerVector = matVectorSize / memScalarSize;
 
@@ -1902,21 +1905,21 @@ private:
 
         uint32_t matScalar = id;
 
-        if (type->vectorSize > 1u)
-          matScalar = m_builder.op(spv::OpCompositeExtract, type->scalarTypeId, id, i / storesPerMatScalar);
+        if (matTypeInfo.vectorSize > 1u)
+          matScalar = m_builder.op(spv::OpCompositeExtract, matTypeInfo.baseTypeId, id, i / storesPerMatScalar);
 
         uint32_t matVector = m_builder.bitcast(vectorType, matScalar);
         valueId = m_builder.op(spv::OpCompositeExtract, memScalarType, matVector, i % storesPerMatScalar);
       } else if (matVectorSize > memScalarSize) {
         /* Pick one or more scalars from the source and bitcast to memory scalar */
         uint32_t matScalarsPerStore = memScalarSize / matScalarSize;
-        uint32_t elementType = m_builder.defVectorType(type->scalarType, matScalarsPerStore);
+        uint32_t elementType = m_builder.defVectorType(matTypeInfo.scalarType, matScalarsPerStore);
 
         if (matScalarsPerStore == 1u) {
           /* Extract one scalar and store it right away, trivial case */
           valueId = id;
 
-          if (type->vectorSize > 1u)
+          if (matTypeInfo.vectorSize > 1u)
             valueId = m_builder.op(spv::OpCompositeExtract, elementType, id, i);
         } else {
           /* Guaranteed to have a vectorized matrix if we reach this */
