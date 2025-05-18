@@ -712,11 +712,6 @@ struct CoopmatTransposeMatrixFn {
   auto operator <=> (const CoopmatTransposeMatrixFn&) const = default;
 
   uint32_t build(SpirvBuilder& mod, uint32_t blockTransposeFn, uint32_t laneIdVar) const {
-    /* Use block-transpose function directly if we only have one array element since
-     * that is equivalent to a full transpose with our matrix layout. */
-    if (type->arraySize == 1u)
-      return blockTransposeFn;
-
     uint32_t uintType = mod.defVectorType(VK_COMPONENT_TYPE_UINT32_KHR, 0u);
     uint32_t paramType = mod.defPointerType(type->typeId, spv::StorageClassFunction);
 
