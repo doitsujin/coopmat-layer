@@ -1280,6 +1280,10 @@ public:
           SpirvInstructionBuilder accessChain(ins.op(), ins.arg(1u), ins.arg(2u));
           accessChain.add(ins.arg(3));
 
+          /* Pattern is access chain -> barrier -> store -> barrier -> load */
+          if (ins.arg(3u) == m_dxilSpvTransposeStoreId)
+            m_elideNextSubgroupBarrier = true;
+
           /* Resolve pointer type of base type */
           auto typeId = m_builder.getOperandTypeId(ins.arg(3u));
           typeId = m_builder.getTypeInfo(typeId).baseTypeId;
@@ -1411,6 +1415,7 @@ public:
            && accessChain.arg(3u) == m_dxilSpvTransposeScratchId && m_dxilSpvTransposeStoreId) {
             auto srcType = findCoopmatType(m_builder.getOperandTypeId(m_dxilSpvTransposeStoreId));
 
+            /* dxil-spirv type conversion, may need a transpose */
             uint32_t matrixId = m_dxilSpvTransposeStoreId;
 
             bool sameLoadStoreLayout = layout != m_dxilSpvTransposeStoreLayout;
@@ -1514,6 +1519,8 @@ public:
            && accessChain.arg(3u) == m_dxilSpvTransposeScratchId) {
             m_dxilSpvTransposeStoreId = ins.arg(2u);
             m_dxilSpvTransposeStoreLayout = layout;
+
+            m_elideNextSubgroupBarrier = true;
             break;
           }
 
@@ -1571,9 +1578,25 @@ public:
           auto storageClass = spv::StorageClass(ins.arg(3u));
           auto id = ins.arg(2u);
 
-          /* DXIL-SPIRV hack: Intercept transpose load/store pairs to avoid LDS round-trip */
+          /* dxil-spirv hack: Intercept transpose load/store pairs to avoid LDS round-trip */
           if (storageClass == spv::StorageClassWorkgroup && m_builder.getName(id) == "LDSTransposeScratch")
             m_dxilSpvTransposeScratchId = id;
+
+          m_builder.addIns(SpirvInstructionBuilder(ins));
+        } break;
+
+        case spv::OpControlBarrier: {
+          /* Remove subgroup barriers generated for the dxil-spirv transpose round-trip */
+          if (m_elideNextSubgroupBarrier) {
+            auto execution = m_builder.evaluateConstant(ins.arg(1u));
+            auto memory = m_builder.evaluateConstant(ins.arg(1u));
+
+            if (execution == std::make_optional(spv::ScopeSubgroup)
+             && memory == std::make_optional(spv::ScopeSubgroup)) {
+              m_elideNextSubgroupBarrier = false;
+              break;
+            }
+          }
 
           m_builder.addIns(SpirvInstructionBuilder(ins));
         } break;
@@ -1614,6 +1637,7 @@ private:
   spv::CooperativeMatrixLayout m_dxilSpvTransposeStoreLayout = spv::CooperativeMatrixLayoutMax;
 
   bool          m_emittedTypes = false;
+  bool          m_elideNextSubgroupBarrier = false;
 
   std::tuple<SpirvInstructionBuilder, uint32_t, uint32_t> rewriteCoopmatLoadStoreAccessChain(uint32_t operandId, uint32_t strideId) {
     uint32_t uintType = m_builder.defVectorType(VK_COMPONENT_TYPE_UINT32_KHR, 0u);
