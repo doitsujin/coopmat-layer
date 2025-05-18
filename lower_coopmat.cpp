@@ -773,10 +773,25 @@ struct CoopmatTransposeMatrixFn {
     }
 
     /* Finally, get the blocks within each register into the correct order */
-    if (type->unitCountPerRegister > 1u) {
-      uint32_t matrixLengthBits = util::tzcnt(type->length);
+    if (type->unitCountPerRegister == 2u && type->unitLength == type->length * 2u) {
+      /* If we get exactly two units per register, we can use a
+       * simpler approach and mirror the middle two blocks */
+      uint32_t selectorId = mod.op(spv::OpULessThan, mod.defBoolType(0u),
+        mod.op(spv::OpISub, uintType, laneId, mod.defConstUint32(type->length)),
+        mod.defConstUint32(type->unitLength));
 
-      uint32_t unitCountBits = util::tzcnt(type->unitCountPerRegister);
+      for (uint32_t r = 0u; r < type->arraySize; r++) {
+        uint32_t originalId = regs.at(r);
+        uint32_t mirroredId = mod.op(spv::OpGroupNonUniformShuffleXor, type->vectorTypeId,
+          mod.defConstUint32(uint32_t(spv::ScopeSubgroup)), originalId,
+          mod.defConstUint32(type->unitLength | type->length));
+
+        regs.at(r) = mod.op(spv::OpSelect, type->vectorTypeId,
+          selectorId, mirroredId, originalId);
+      }
+    } else if (type->unitCountPerRegister > 1u) {
+      /* Otherwise, we need a complex shuffle */
+      uint32_t matrixLengthBits = util::tzcnt(type->length);
       uint32_t unitLengthBits = util::tzcnt(type->unitLength);
 
       uint32_t unitId = mod.op(spv::OpShiftRightLogical, uintType, laneId, mod.defConstUint32(matrixLengthBits));
