@@ -1001,7 +1001,7 @@ struct CoopmatMulAddFn {
      * For floats, convert up to result type before accumulation in order to
      * maintain precision. If we're using integer dot products, we need to
      * use a 32-bit intermediate result based on operand signedness. */
-    VkComponentTypeKHR intermediateType = dType->scalarType;
+    VkComponentTypeKHR intermediateType = aType->scalarType;
 
     if (!util::isFloatType(aType->scalarType)) {
       intermediateType = util::get32BitType(aType->scalarType);
@@ -1010,7 +1010,7 @@ struct CoopmatMulAddFn {
         intermediateType = util::getSignedType(intermediateType);
     }
 
-    uint32_t intermediateTypeId = mod.defVectorType(intermediateType, 0u);;
+    uint32_t intermediateTypeId = mod.defVectorType(intermediateType, 2u);;
 
     /* Row vectors computed in each iteration */
     std::vector<uint32_t> registerRows(dType->unitCountPerRegister);
@@ -1019,6 +1019,8 @@ struct CoopmatMulAddFn {
     CoopmatBuilder d(mod, *dType);
 
     for (uint32_t baseRow = 0u; baseRow < dType->length; baseRow++) {
+      uint32_t intermediateTypeId = mod.defVectorType(intermediateType, 2u);;
+
       /* The following code largely assumes that all matrices are square, and thus of the
        * same size. The matrix layout for rectangular matrices differs substantially, and
        * broadcasts and shuffles like these would not select the correct lanes or rows. */
@@ -1040,16 +1042,16 @@ struct CoopmatMulAddFn {
             uint32_t dotProductId = mod.op(spv::OpFMul, aType->vectorTypeId, aElements, bElements);
             dotProductId = mod.convert(intermediateVectorTypeId, dotProductId);
 
-            if (aType->vectorSize > 1u) {
-              uint32_t localSumId = mod.op(spv::OpCompositeExtract, intermediateTypeId, dotProductId, 0u);
-
-              for (uint32_t i = 1u; i < aType->vectorSize; i++) {
-                localSumId = mod.op(spv::OpFAdd, intermediateTypeId, localSumId,
-                  mod.op(spv::OpCompositeExtract, intermediateTypeId, dotProductId, i));
-              }
-
-              dotProductId = localSumId;
-            }
+            // if (aType->vectorSize > 1u) {
+            //   uint32_t localSumId = mod.op(spv::OpCompositeExtract, intermediateTypeId, dotProductId, 0u);
+            //
+            //   for (uint32_t i = 1u; i < aType->vectorSize; i++) {
+            //     localSumId = mod.op(spv::OpFAdd, intermediateTypeId, localSumId,
+            //       mod.op(spv::OpCompositeExtract, intermediateTypeId, dotProductId, i));
+            //   }
+            //
+            //   dotProductId = localSumId;
+            // }
 
             /* Accumulate row result */
             rowResultId = rowResultId
@@ -1060,8 +1062,14 @@ struct CoopmatMulAddFn {
           }
         }
 
+        rowResultId = mod.op(spv::OpFAdd, aType->scalarTypeId,
+          mod.op(spv::OpCompositeExtract, aType->scalarTypeId, rowResultId, 0u),
+          mod.op(spv::OpCompositeExtract, aType->scalarTypeId, rowResultId, 1u));
+
         registerRows.at(localRow) = rowResultId;
       }
+
+      intermediateTypeId = aType->scalarTypeId;
 
       /* Each intermediate register may still hold multiple different parts of the
        * same row, which we need to horizontally add. Merge the different output
