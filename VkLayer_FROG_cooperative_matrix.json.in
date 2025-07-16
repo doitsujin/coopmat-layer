@@ -4,17 +4,17 @@
       "name": "VK_LAYER_FROG_cooperative_matrix",
       "type": "GLOBAL",
       "api_version": "1.4.307",
-      "library_path": "VkLayer_FROG_cooperative_matrix.so",
+      "library_path": "@lib_dir@/libVkLayer_FROG_cooperative_matrix_@family@.so",
       "implementation_version": "1",
-      "description": "Cooperative matrix emulation layer",
+      "description": "Cooperative matrix emulation layer (@family@)",
       "functions": {
          "vkNegotiateLoaderLayerInterfaceVersion": "vkNegotiateLoaderLayerInterfaceVersion"
       },
       "enable_environment": {
-        "ENABLE_VKROOTS_TEST_1": "1"
+        "ENABLE_COOPMAT_LAYER": "1"
       },
       "disable_environment": {
-        "DISABLE_VKROOTS_TEST_1": "1"
+        "DISABLE_COOPMAT_LAYER": "1"
       }
     }
 }
