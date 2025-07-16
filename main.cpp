@@ -1,6 +1,5 @@
 #include "vkroots.h"
 
-#include "util/object_map.h"
 #include "util/vulkan_util.h"
 
 #include "lower_coopmat.h"
@@ -81,14 +80,13 @@ class PhysicalDeviceInfo {
 public:
 
   PhysicalDeviceInfo(
-    const vkroots::VkInstanceDispatch*        pDispatch,
+    const vkroots::VkPhysicalDeviceDispatch&  dispatch,
           VkPhysicalDevice                    physicalDevice)
-  : m_dispatch                (pDispatch)
-  , m_physicalDeviceDispatch  (vkroots::tables::LookupPhysicalDeviceDispatch(physicalDevice))
+  : m_dispatch                (dispatch)
   , m_handle                  (physicalDevice) {
     /* Check adapter info, don't bother if we don't have Vulkan 1.3 available */
     VkPhysicalDeviceProperties properties = { };
-    m_dispatch->GetPhysicalDeviceProperties(m_handle, &properties);
+    m_dispatch.GetPhysicalDeviceProperties(m_handle, &properties);
 
     if (properties.apiVersion < VK_MAKE_API_VERSION(0, 1, 3, 0)) {
       std::cerr << "Ignoring adapter " << properties.deviceName << " with unsupported Vulkan version " <<
@@ -98,8 +96,8 @@ public:
     }
 
     /* Query device properties and features */
-    m_dispatch->GetPhysicalDeviceFeatures2(m_handle, &m_features.core);
-    m_dispatch->GetPhysicalDeviceProperties2(m_handle, &m_properties.core);
+    m_dispatch.GetPhysicalDeviceFeatures2(m_handle, &m_features.core);
+    m_dispatch.GetPhysicalDeviceProperties2(m_handle, &m_properties.core);
 
     /* If we can't meaningfully use subgroup ops, skip */
     constexpr static VkSubgroupFeatureFlags subgroupFlags =
@@ -118,11 +116,11 @@ public:
     }
 
     /* Query extensions */
-    uint32_t extensionCount = 0u;
-    m_dispatch->EnumerateDeviceExtensionProperties(m_handle, nullptr, &extensionCount, nullptr);
-
-    std::vector<VkExtensionProperties> extensions(extensionCount);
-    m_dispatch->EnumerateDeviceExtensionProperties(m_handle, nullptr, &extensionCount, extensions.data());
+    std::vector<VkExtensionProperties> extensions;
+    vkroots::enumerate(
+      vkr_dispatch_bind(dispatch, EnumerateDeviceExtensionProperties),
+      extensions,
+      m_handle, nullptr);
 
     for (const auto& e : extensions)
       m_extensions.insert(e);
@@ -201,14 +199,11 @@ public:
    */
   void getPhysicalDeviceFeatures(
           VkPhysicalDeviceFeatures2*          pFeatures) const {
-    auto [coopmatKhr, headerKhr] = vkroots::RemoveFromChain<VkPhysicalDeviceCooperativeMatrixFeaturesKHR>(pFeatures);
-    m_dispatch->GetPhysicalDeviceFeatures2(m_handle, pFeatures);
+    m_dispatch.GetPhysicalDeviceFeatures2(m_handle, pFeatures);
 
-    if (coopmatKhr) {
+    if (auto coopmatKhr = vkroots::FindInChainMutable<VkPhysicalDeviceCooperativeMatrixFeaturesKHR>(pFeatures)) {
       coopmatKhr->cooperativeMatrix = true;
       coopmatKhr->cooperativeMatrixRobustBufferAccess = true;
-
-      headerKhr->pNext = reinterpret_cast<VkBaseOutStructure*>(coopmatKhr);
     }
   }
 
@@ -220,13 +215,10 @@ public:
    */
   void getPhysicalDeviceProperties(
           VkPhysicalDeviceProperties2*        pProperties) const {
-    auto [coopmatKhr, headerKhr] = vkroots::RemoveFromChain<VkPhysicalDeviceCooperativeMatrixPropertiesKHR>(pProperties);
-    m_dispatch->GetPhysicalDeviceProperties2(m_handle, pProperties);
+    m_dispatch.GetPhysicalDeviceProperties2(m_handle, pProperties);
 
-    if (coopmatKhr) {
+    if (auto coopmatKhr = vkroots::FindInChainMutable<VkPhysicalDeviceCooperativeMatrixPropertiesKHR>(pProperties)) {
       coopmatKhr->cooperativeMatrixSupportedStages = VK_SHADER_STAGE_COMPUTE_BIT;
-
-      headerKhr->pNext = reinterpret_cast<VkBaseOutStructure*>(coopmatKhr);
     }
   }
 
@@ -329,8 +321,7 @@ public:
 
 private:
 
-  const vkroots::VkInstanceDispatch*        m_dispatch                = nullptr;
-  const vkroots::VkPhysicalDeviceDispatch*  m_physicalDeviceDispatch  = nullptr;
+  const vkroots::VkPhysicalDeviceDispatch& m_dispatch;
 
   VkPhysicalDevice                    m_handle    = VK_NULL_HANDLE;
 
@@ -390,25 +381,6 @@ private:
 };
 
 
-static ObjectMap<VkPhysicalDevice, PhysicalDeviceInfo> g_physicalDevices;
-
-static std::shared_ptr<PhysicalDeviceInfo> findPhysicalDevice(
-        VkPhysicalDevice                    physicalDevice) {
-  return g_physicalDevices.find(physicalDevice);
-}
-
-static std::shared_ptr<PhysicalDeviceInfo> getOrCreatePhysicalDevice(
-        VkPhysicalDevice                    physicalDevice,
-  const vkroots::VkInstanceDispatch*        pDispatch) {
-  auto device = findPhysicalDevice(physicalDevice);
-
-  if (device)
-    return device;
-
-  return g_physicalDevices.create(physicalDevice, pDispatch, physicalDevice);
-}
-
-
 /** Shader module */
 class ShaderModuleInfo {
 
@@ -445,11 +417,13 @@ class DeviceInfo {
 public:
 
   DeviceInfo(
+    const vkroots::VkDeviceDispatch&        dispatch,
           VkDevice                          handle,
           VkPhysicalDevice                  physicalDevice,
     const VkDeviceCreateInfo*               pCreateInfo)
-  : m_handle              (handle)
-  , m_physicalDeviceInfo  (findPhysicalDevice(physicalDevice)) {
+  : m_dispatch            (dispatch)
+  , m_handle              (handle)
+  , m_physicalDeviceInfo  (dispatch.pPhysicalDeviceDispatch->UserData) {
 
   }
 
@@ -468,7 +442,7 @@ public:
     const VkShaderModuleCreateInfo*         pCreateInfo,
     const VkAllocationCallbacks*            pAllocator,
           VkShaderModule*                   pShaderModule) {
-    VkResult vr = m_dispatch->CreateShaderModule(m_handle, pCreateInfo, pAllocator, pShaderModule);
+    VkResult vr = m_dispatch.CreateShaderModule(m_handle, pCreateInfo, pAllocator, pShaderModule);
 
     if (vr)
       return vr;
@@ -490,7 +464,7 @@ public:
     const VkAllocationCallbacks*            pAllocator) {
     m_shaderModules.erase(shaderModule);
 
-    m_dispatch->DestroyShaderModule(m_handle, shaderModule, pAllocator);
+    m_dispatch.DestroyShaderModule(m_handle, shaderModule, pAllocator);
   }
 
 
@@ -523,7 +497,7 @@ public:
     /* Check if a specific subgroup size is required. If not, use the
      * smallest available subgroup size that is at least 4. We need to
      * know the actual subgroup size at compile time. */
-    uint32_t subgroupSize = std::max(4u, m_physicalDeviceInfo->getProperties().vk13.minSubgroupSize);
+    uint32_t subgroupSize = std::max(4u, m_physicalDeviceInfo.getProperties().vk13.minSubgroupSize);
 
     VkPipelineShaderStageRequiredSubgroupSizeCreateInfo requiredSubgroupSizeOut = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO };
     requiredSubgroupSizeOut.requiredSubgroupSize = subgroupSize;
@@ -549,17 +523,17 @@ public:
         moduleCreateInfo.codeSize = patchedCode.size() * sizeof(uint32_t);
         moduleCreateInfo.pCode = patchedCode.data();
 
-        if (auto vr = m_dispatch->CreateShaderModule(m_handle, &moduleCreateInfo, pAllocator, &tmpModule))
+        if (auto vr = m_dispatch.CreateShaderModule(m_handle, &moduleCreateInfo, pAllocator, &tmpModule))
           return vr;
 
         createInfo.stage.module = tmpModule;
       }
 
-      *pResult = m_dispatch->CreateComputePipelines(m_handle,
+      *pResult = m_dispatch.CreateComputePipelines(m_handle,
         pipelineCache, 1, &createInfo, pAllocator, pPipeline);
 
       if (tmpModule)
-        m_dispatch->DestroyShaderModule(m_handle, tmpModule, pAllocator);
+        m_dispatch.DestroyShaderModule(m_handle, tmpModule, pAllocator);
     } else if (auto* chainedCode = const_cast<VkShaderModuleCreateInfo*>(vkroots::FindInChain<VkShaderModuleCreateInfo>(&createInfo.stage))) {
       VkShaderModuleCreateInfo origCode = *chainedCode;
 
@@ -568,7 +542,7 @@ public:
       chainedCode->codeSize = patchedCode.size() * sizeof(uint32_t);
       chainedCode->pCode = patchedCode.data();
 
-      *pResult = m_dispatch->CreateComputePipelines(m_handle,
+      *pResult = m_dispatch.CreateComputePipelines(m_handle,
         pipelineCache, 1, &createInfo, pAllocator, pPipeline);
 
       /* Restore original structure */
@@ -581,216 +555,171 @@ public:
     return !pResult || !(createFlags2 & VK_PIPELINE_CREATE_2_EARLY_RETURN_ON_FAILURE_BIT);
   }
 
-
-  /**
-   * \brief Assigns device dispatch function
-   * \param [in] dispatch Dispatcher
-   */
-  void setDispatch(const vkroots::VkDeviceDispatch* dispatch) {
-    m_dispatch = dispatch;
-  }
-
 private:
 
-  const vkroots::VkDeviceDispatch*  m_dispatch  = nullptr;
+  const vkroots::VkDeviceDispatch&  m_dispatch;
   VkDevice                          m_handle    = VK_NULL_HANDLE;
 
-  std::shared_ptr<PhysicalDeviceInfo> m_physicalDeviceInfo;
+  PhysicalDeviceInfo&               m_physicalDeviceInfo;
 
-  ObjectMap<VkShaderModule, ShaderModuleInfo> m_shaderModules;
+  vkroots::ObjectMap<VkShaderModule, ShaderModuleInfo> m_shaderModules;
 
 };
-
-static ObjectMap<VkDevice, DeviceInfo> g_devices;
-
-auto findDevice(const vkroots::VkDeviceDispatch* dispatch, VkDevice device) {
-  auto dev = g_devices.find(device);
-
-  if (dev)
-    dev->setDispatch(dispatch);
-
-  return dev;
-}
-
 
 class VkInstanceOverrides {
 
 public:
 
-  static void DestroyInstance(
-    const vkroots::VkInstanceDispatch*        pDispatch,
-          VkInstance                          instance,
-    const VkAllocationCallbacks*              pAllocator) {
-    /* Destroy adapter infos before the handles can be reused */
-    uint32_t adapterCount = 0u;
+  static VkResult CreateInstance(
+            PFN_vkCreateInstance   pfnCreateInstanceProc,
+      const VkInstanceCreateInfo*  pCreateInfo,
+      const VkAllocationCallbacks* pAllocator,
+            VkInstance*            pInstance) {
+    VkResult vr = pfnCreateInstanceProc(pCreateInfo, pAllocator, pInstance);
+    if (vr)
+      return vr;
 
-    if (!pDispatch->EnumeratePhysicalDevices(instance, &adapterCount, nullptr)) {
-      std::vector<VkPhysicalDevice> adapters(adapterCount);
+    auto pInstanceDispatch = vkroots::LookupDispatch(*pInstance);
+    for (auto *pPhysicalDeviceDispatch : pInstanceDispatch->PhysicalDeviceDispatches)
+      pPhysicalDeviceDispatch->UserData.emplace<PhysicalDeviceInfo>(*pPhysicalDeviceDispatch, pPhysicalDeviceDispatch->PhysicalDevice);
 
-      if (!pDispatch->EnumeratePhysicalDevices(instance, &adapterCount, adapters.data())) {
-        for (auto adapter : adapters)
-          g_physicalDevices.erase(adapter);
-      }
-    }
-
-    pDispatch->DestroyInstance(instance, pAllocator);
+    return VK_SUCCESS; 
   }
 
-
   static VkResult EnumerateDeviceExtensionProperties(
-    const vkroots::VkInstanceDispatch*        pDispatch,
+    const vkroots::VkPhysicalDeviceDispatch&  dispatch,
           VkPhysicalDevice                    physicalDevice,
     const char*                               pLayerName,
           uint32_t*                           pPropertyCount,
           VkExtensionProperties*              pProperties) {
-    auto device = getOrCreatePhysicalDevice(physicalDevice, pDispatch);
+    auto& device = (PhysicalDeviceInfo &)dispatch.UserData;
 
-    if (!device->isLayerEnabled())
-      return pDispatch->EnumerateDeviceExtensionProperties(physicalDevice, pLayerName, pPropertyCount, pProperties);
+    if (!device.isLayerEnabled())
+      return dispatch.EnumerateDeviceExtensionProperties(physicalDevice, pLayerName, pPropertyCount, pProperties);
 
-    return device->enumerateExtensionProperties(pLayerName, pPropertyCount, pProperties);
+    return device.enumerateExtensionProperties(pLayerName, pPropertyCount, pProperties);
   }
 
 
   static void GetPhysicalDeviceFeatures2(
-    const vkroots::VkInstanceDispatch*        pDispatch,
+    const vkroots::VkPhysicalDeviceDispatch&  dispatch,
           VkPhysicalDevice                    physicalDevice,
           VkPhysicalDeviceFeatures2*          pFeatures) {
-    auto device = getOrCreatePhysicalDevice(physicalDevice, pDispatch);
+    auto& device = (PhysicalDeviceInfo &)dispatch.UserData;
 
-    if (!device->isLayerEnabled()) {
-      pDispatch->GetPhysicalDeviceFeatures2(physicalDevice, pFeatures);
+    if (!device.isLayerEnabled()) {
+      dispatch.GetPhysicalDeviceFeatures2(physicalDevice, pFeatures);
       return;
     }
 
-    device->getPhysicalDeviceFeatures(pFeatures);
+    device.getPhysicalDeviceFeatures(pFeatures);
   }
 
 
   static void GetPhysicalDeviceFeatures2KHR(
-    const vkroots::VkInstanceDispatch*        pDispatch,
+    const vkroots::VkPhysicalDeviceDispatch&  dispatch,
           VkPhysicalDevice                    physicalDevice,
           VkPhysicalDeviceFeatures2KHR*       pFeatures) {
-    auto device = getOrCreatePhysicalDevice(physicalDevice, pDispatch);
+    auto& device = (PhysicalDeviceInfo &)dispatch.UserData;
 
-    if (!device->isLayerEnabled()) {
-      pDispatch->GetPhysicalDeviceFeatures2KHR(physicalDevice, pFeatures);
+    if (!device.isLayerEnabled()) {
+      dispatch.GetPhysicalDeviceFeatures2KHR(physicalDevice, pFeatures);
       return;
     }
 
-    device->getPhysicalDeviceFeatures(pFeatures);
+    device.getPhysicalDeviceFeatures(pFeatures);
   }
 
 
   static void GetPhysicalDeviceProperties2(
-    const vkroots::VkInstanceDispatch*        pDispatch,
+    const vkroots::VkPhysicalDeviceDispatch&  dispatch,
           VkPhysicalDevice                    physicalDevice,
           VkPhysicalDeviceProperties2*        pProperties) {
-    auto device = getOrCreatePhysicalDevice(physicalDevice, pDispatch);
+    auto& device = (PhysicalDeviceInfo &)dispatch.UserData;
 
-    if (!device->isLayerEnabled()) {
-      pDispatch->GetPhysicalDeviceProperties2(physicalDevice, pProperties);
+    if (!device.isLayerEnabled()) {
+      dispatch.GetPhysicalDeviceProperties2(physicalDevice, pProperties);
       return;
     }
 
-    device->getPhysicalDeviceProperties(pProperties);
+    device.getPhysicalDeviceProperties(pProperties);
   }
 
 
   static void GetPhysicalDeviceProperties2KHR(
-    const vkroots::VkInstanceDispatch*        pDispatch,
+    const vkroots::VkPhysicalDeviceDispatch&  dispatch,
           VkPhysicalDevice                    physicalDevice,
           VkPhysicalDeviceProperties2*        pProperties) {
-    auto device = getOrCreatePhysicalDevice(physicalDevice, pDispatch);
+    auto& device = (PhysicalDeviceInfo &)dispatch.UserData;
 
-    if (!device->isLayerEnabled()) {
-      pDispatch->GetPhysicalDeviceProperties2KHR(physicalDevice, pProperties);
+    if (!device.isLayerEnabled()) {
+      dispatch.GetPhysicalDeviceProperties2KHR(physicalDevice, pProperties);
       return;
     }
 
-    device->getPhysicalDeviceProperties(pProperties);
+    device.getPhysicalDeviceProperties(pProperties);
+  }
+
+
+  static VkResult GetPhysicalDeviceCooperativeMatrixPropertiesKHR(
+    const vkroots::VkPhysicalDeviceDispatch&  dispatch,
+          VkPhysicalDevice                    physicalDevice,
+          uint32_t*                           pPropertyCount,
+          VkCooperativeMatrixPropertiesKHR*   pProperties) {
+    auto& device = (PhysicalDeviceInfo &)dispatch.UserData;
+
+    if (!device.isLayerEnabled())
+      return dispatch.GetPhysicalDeviceCooperativeMatrixPropertiesKHR(physicalDevice, pPropertyCount, pProperties);
+
+    return device.getCooperativeMatrixProperties(pPropertyCount, pProperties);
   }
 
 
   static VkResult CreateDevice(
-    const vkroots::VkInstanceDispatch*        pDispatch,
+    const vkroots::VkPhysicalDeviceDispatch&  dispatch,
           VkPhysicalDevice                    physicalDevice,
     const VkDeviceCreateInfo*                 pCreateInfo,
     const VkAllocationCallbacks*              pAllocator,
           VkDevice*                           pDevice) {
-    auto device = getOrCreatePhysicalDevice(physicalDevice, pDispatch);
+    auto& device = (PhysicalDeviceInfo &)dispatch.UserData;
 
-    if (!device->isLayerEnabled())
-      return pDispatch->CreateDevice(physicalDevice, pCreateInfo, pAllocator, pDevice);
+    if (!device.isLayerEnabled())
+      return dispatch.CreateDevice(physicalDevice, pCreateInfo, pAllocator, pDevice);
 
     /* Ignore if the device does not enable cooperative matrix features */
     auto coopmatFeatures = vkroots::FindInChain<VkPhysicalDeviceCooperativeMatrixFeaturesKHR>(pCreateInfo);
 
     if (!coopmatFeatures || !coopmatFeatures->cooperativeMatrix)
-      return pDispatch->CreateDevice(physicalDevice, pCreateInfo, pAllocator, pDevice);
+      return dispatch.CreateDevice(physicalDevice, pCreateInfo, pAllocator, pDevice);
 
-    const auto& supported = device->getFeatures();
+    const auto& supported = device.getFeatures();
 
     /* Need to be able to enable some extra features */
     VkDeviceCreateInfo createInfo = *pCreateInfo;
 
-    auto [vk12_in, vk12_header] = vkroots::RemoveFromChain<VkPhysicalDeviceVulkan12Features>(&createInfo);
-    VkPhysicalDeviceVulkan12Features vk12 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
+    vkroots::ChainPatcher<VkPhysicalDeviceVulkan12Features> features12Patcher(&createInfo, [&](VkPhysicalDeviceVulkan12Features *vk12) {
+      vk12->subgroupBroadcastDynamicId = VK_TRUE;
+      // Add this if it wasn't already present.
+      return true;
+    });
 
-    if (vk12_in) {
-      vk12 = *vk12_in;
-      vk12.pNext = nullptr;
-    }
+    vkroots::ChainPatcher<VkPhysicalDeviceVulkan13Features> features13Patcher(&createInfo, [&](VkPhysicalDeviceVulkan13Features *vk13) {
+      vk13->subgroupSizeControl = VK_TRUE;
+      vk13->computeFullSubgroups = VK_TRUE;
+      vk13->shaderIntegerDotProduct = supported.vk13.shaderIntegerDotProduct;
+      // Add this if it wasn't already present.
+      return true;
+    });
 
-    vk12.subgroupBroadcastDynamicId = VK_TRUE;
-
-    auto [vk13_in, vk13_header] = vkroots::RemoveFromChain<VkPhysicalDeviceVulkan13Features>(&createInfo);
-    VkPhysicalDeviceVulkan13Features vk13 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES };
-
-    if (vk13_in) {
-      vk13 = *vk13_in;
-      vk13.pNext = nullptr;
-    }
-
-    vk13.subgroupSizeControl = VK_TRUE;
-    vk13.computeFullSubgroups = VK_TRUE;
-    vk13.shaderIntegerDotProduct = supported.vk13.shaderIntegerDotProduct;
-
-    /* api-side constness issues make this annoying */
-    vk12.pNext = &vk13;
-    vk13.pNext = const_cast<void*>(createInfo.pNext);
-    createInfo.pNext = &vk12;
-
-    VkResult vr = pDispatch->CreateDevice(physicalDevice, &createInfo, pAllocator, pDevice);
-
-    /* Restore original pNext chain */
-    if (vk13_in) vk13_header->pNext = reinterpret_cast<VkBaseOutStructure*>(vk13_in);
-    if (vk12_in) vk12_header->pNext = reinterpret_cast<VkBaseOutStructure*>(vk12_in);
+    VkResult vr = dispatch.CreateDevice(physicalDevice, &createInfo, pAllocator, pDevice);
 
     if (vr)
       return vr;
 
-    g_devices.create(*pDevice, *pDevice, physicalDevice, &createInfo);
+    const auto *pDeviceDispatch = vkroots::LookupDispatch(*pDevice);
+    pDeviceDispatch->UserData.emplace<DeviceInfo>(*pDeviceDispatch, *pDevice, physicalDevice, &createInfo);
+
     return VK_SUCCESS;
-  }
-
-};
-
-class VkPhysicalDeviceOverrides {
-
-public:
-
-  static VkResult GetPhysicalDeviceCooperativeMatrixPropertiesKHR(
-    const vkroots::VkPhysicalDeviceDispatch*  pDispatch,
-          VkPhysicalDevice                    physicalDevice,
-          uint32_t*                           pPropertyCount,
-          VkCooperativeMatrixPropertiesKHR*   pProperties) {
-    auto device = findPhysicalDevice(physicalDevice);
-
-    if (!device || !device->isLayerEnabled())
-      return pDispatch->GetPhysicalDeviceCooperativeMatrixPropertiesKHR(physicalDevice, pPropertyCount, pProperties);
-
-    return device->getCooperativeMatrixProperties(pPropertyCount, pProperties);
   }
 
 };
@@ -800,62 +729,48 @@ class VkDeviceOverrides {
 
 public:
 
-  static void DestroyDevice(
-    const vkroots::VkDeviceDispatch*          pDispatch,
-          VkDevice                            device,
-    const VkAllocationCallbacks*              pAllocator) {
-    g_devices.erase(device);
-
-    pDispatch->DestroyDevice(device, pAllocator);
-  }
-
 
   static VkResult CreateShaderModule(
-    const vkroots::VkDeviceDispatch*          pDispatch,
+    const vkroots::VkDeviceDispatch&          dispatch,
           VkDevice                            device,
     const VkShaderModuleCreateInfo*           pCreateInfo,
     const VkAllocationCallbacks*              pAllocator,
           VkShaderModule*                     pShaderModule) {
-    auto layered = findDevice(pDispatch, device);
+    if (!dispatch.UserData)
+      return dispatch.CreateShaderModule(device, pCreateInfo, pAllocator, pShaderModule);
 
-    if (!layered)
-      return pDispatch->CreateShaderModule(device, pCreateInfo, pAllocator, pShaderModule);
-
-    return layered->createShaderModule(pCreateInfo, pAllocator, pShaderModule);
+    auto& layered = (DeviceInfo &)dispatch.UserData;
+    return layered.createShaderModule(pCreateInfo, pAllocator, pShaderModule);
   }
 
 
   static void DestroyShaderModule(
-    const vkroots::VkDeviceDispatch*          pDispatch,
+    const vkroots::VkDeviceDispatch&          dispatch,
           VkDevice                            device,
           VkShaderModule                      shaderModule,
     const VkAllocationCallbacks*              pAllocator) {
-    auto layered = findDevice(pDispatch, device);
+    if (!dispatch.UserData)
+      dispatch.DestroyShaderModule(device, shaderModule, pAllocator);
 
-    if (!layered) {
-      pDispatch->DestroyShaderModule(device, shaderModule, pAllocator);
-      return;
-    }
-
-    layered->destroyShaderModule(shaderModule, pAllocator);
+    auto& layered = (DeviceInfo &)dispatch.UserData;
+    layered.destroyShaderModule(shaderModule, pAllocator);
   }
 
 
   static VkResult CreateComputePipelines(
-    const vkroots::VkDeviceDispatch*          pDispatch,
+    const vkroots::VkDeviceDispatch&          dispatch,
           VkDevice                            device,
           VkPipelineCache                     pipelineCache,
           uint32_t                            createInfoCount,
     const VkComputePipelineCreateInfo*        pCreateInfos,
     const VkAllocationCallbacks*              pAllocator,
           VkPipeline*                         pPipelines) {
-    auto layered = findDevice(pDispatch, device);
-
-    if (!layered) {
-      return pDispatch->CreateComputePipelines(device, pipelineCache,
+    if (!dispatch.UserData) {
+      return dispatch.CreateComputePipelines(device, pipelineCache,
         createInfoCount, pCreateInfos, pAllocator, pPipelines);
     }
-
+    
+    auto& layered = (DeviceInfo &)dispatch.UserData;
     VkResult vr = VK_SUCCESS;
 
     for (uint32_t i = 0; i < createInfoCount; i++) {
@@ -863,7 +778,7 @@ public:
 
       VkResult pipelineVr = VK_SUCCESS;
 
-      if (!layered->createComputePipeline(pipelineCache, &pCreateInfos[i], pAllocator, &pPipelines[i], &pipelineVr))
+      if (!layered.createComputePipeline(pipelineCache, &pCreateInfos[i], pAllocator, &pPipelines[i], &pipelineVr))
         return pipelineVr;
 
       if (pipelineVr)
@@ -878,5 +793,4 @@ public:
 }
 
 VKROOTS_DEFINE_LAYER_INTERFACES(CoopmatLayer::VkInstanceOverrides,
-                                CoopmatLayer::VkPhysicalDeviceOverrides,
                                 CoopmatLayer::VkDeviceOverrides);
