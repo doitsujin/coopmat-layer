@@ -164,6 +164,7 @@ uint32_t SpirvBuilder::addIns(const SpirvInstructionBuilder& ins) {
     case spv::OpTypeCooperativeMatrixKHR:
     case spv::OpTypeCooperativeMatrixNV:
     case spv::OpTypePointer:
+    case spv::OpTypeForwardPointer:
     case spv::OpConstantNull:
     case spv::OpConstantTrue:
     case spv::OpConstantFalse:
@@ -842,6 +843,9 @@ bool SpirvBuilder::canEmitDeclaration(
 
     case spv::OpTypePointer:
       return hasDeclaration(emitted, ins.arg(3u));
+
+    case spv::OpTypeForwardPointer:
+      return true;
 
     case spv::OpConstantNull:
     case spv::OpConstantTrue:
