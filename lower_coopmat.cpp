@@ -1,6 +1,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <iomanip>
 #include <map>
 #include <sstream>
 #include <unordered_set>
@@ -1221,12 +1222,18 @@ public:
           uint32_t                                subgroupSize)
   : m_reader        (pCreateInfo->codeSize, pCreateInfo->pCode)
   , m_builder       (m_reader.getHeader(), pSpecInfo)
-  , m_subgroupSize  (subgroupSize) {
+  , m_subgroupSize  (subgroupSize)
+  , m_fallbackName  (getFallbackName(pCreateInfo->codeSize, pCreateInfo->pCode)){
 
   }
 
   std::string getSourceName() const {
-    return m_builder.getSourceName();
+    std::string name = m_builder.getSourceName();
+
+    if (name.empty())
+      name = m_fallbackName;
+
+    return name;
   }
 
   std::vector<uint32_t> run() {
@@ -1617,6 +1624,8 @@ private:
   SpirvBuilder  m_builder;
 
   uint32_t      m_subgroupSize = 0u;
+
+  std::string   m_fallbackName;
 
   std::unordered_map<uint32_t, CoopmatType> m_coopmatTypes;
   std::vector<SpirvInstructionBuilder>      m_coopmatConstants;
@@ -2307,6 +2316,22 @@ private:
       return nullptr;
 
     return &entry->second;
+  }
+
+
+  static std::string getFallbackName(size_t sizeInBytes, const uint32_t* data) {
+      size_t dwordCount = sizeInBytes / sizeof(*data);
+
+      uint32_t hash = 0x811c9dc5u;
+
+      for (size_t i = 0; i < dwordCount; i++) {
+        hash ^= data[i];
+        hash *= 0x01000193u;
+      }
+
+      std::stringstream name;
+      name << std::hex << std::setw(8) << std::setfill(' ') << hash;
+      return name.str();
   }
 
 };
