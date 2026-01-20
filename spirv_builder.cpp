@@ -261,11 +261,11 @@ std::vector<uint32_t> SpirvBuilder::finalize() const {
     ins.push(code);
   }
 
-  for (const auto& name : m_names)
-    name.second.push(code);
-
   if (m_source.len())
     m_source.push(code);
+
+  for (const auto& name : m_names)
+    name.second.push(code);
 
   /* We un-gropup decoration groups already */
   for (const auto& ins : m_decorations)
