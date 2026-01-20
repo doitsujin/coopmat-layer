@@ -2011,8 +2011,13 @@ private:
       if (operandCount) {
         loadOp.add(operands[0u]);
 
+        uint32_t n = 1;
+
         if (operands[0u] & spv::MemoryAccessAlignedMask)
-          loadOp.add(std::min(operands[1u], memScalarSize));
+          loadOp.add(std::min(operands[n++], memScalarSize));
+
+        if (operands[0u] & spv::MemoryAccessMakePointerVisibleMask)
+          loadOp.add(operands[n++]);
       }
 
       memScalars.at(i) = m_builder.addIns(loadOp);
@@ -2174,8 +2179,13 @@ private:
       if (operandCount) {
         storeOp.add(operands[0u]);
 
+        uint32_t n = 1;
+
         if (operands[0u] & spv::MemoryAccessAlignedMask)
-          storeOp.add(std::min(operands[1u], memScalarSize));
+          storeOp.add(std::min(operands[n++], memScalarSize));
+
+        if (operands[0u] & spv::MemoryAccessMakePointerAvailableMask)
+          storeOp.add(operands[n++]);
       }
 
       m_builder.addIns(storeOp);
