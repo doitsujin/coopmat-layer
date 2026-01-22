@@ -1030,30 +1030,49 @@ struct CoopmatMulAddFn {
 
           if (util::isFloatType(aType->scalarType)) {
             /* Multiply as-is, then accumulate using the destination type. If applicable,
-             * smart compilers may give us packed dot products here. */
+             * smart compilers may give us packed dot products here. If accumulator and
+             * inputs use the same types, try to use packed math instead. */
             uint32_t intermediateVectorTypeId = mod.defVectorType(intermediateType, aType->vectorSize);
 
             uint32_t dotProductId = mod.op(spv::OpFMul, aType->vectorTypeId, aElements, bElements);
             dotProductId = mod.convert(intermediateVectorTypeId, dotProductId);
 
-            if (aType->vectorSize > 1u) {
-              uint32_t localSumId = mod.op(spv::OpCompositeExtract, intermediateTypeId, dotProductId, 0u);
+            if (aType->scalarType == intermediateType) {
+              rowResultId = rowResultId
+                ? mod.op(spv::OpFAdd, intermediateVectorTypeId, rowResultId, dotProductId)
+                : dotProductId;
+            } else {
+              if (aType->vectorSize > 1u) {
+                uint32_t localSumId = mod.op(spv::OpCompositeExtract, intermediateTypeId, dotProductId, 0u);
 
-              for (uint32_t i = 1u; i < aType->vectorSize; i++) {
-                localSumId = mod.op(spv::OpFAdd, intermediateTypeId, localSumId,
-                  mod.op(spv::OpCompositeExtract, intermediateTypeId, dotProductId, i));
+                for (uint32_t i = 1u; i < aType->vectorSize; i++) {
+                  localSumId = mod.op(spv::OpFAdd, intermediateTypeId, localSumId,
+                    mod.op(spv::OpCompositeExtract, intermediateTypeId, dotProductId, i));
+                }
+
+                dotProductId = localSumId;
               }
 
-              dotProductId = localSumId;
+              /* Accumulate row result */
+              rowResultId = rowResultId
+                ? mod.op(spv::OpFAdd, intermediateTypeId, rowResultId, dotProductId)
+                : dotProductId;
             }
-
-            /* Accumulate row result */
-            rowResultId = rowResultId
-              ? mod.op(spv::OpFAdd, intermediateTypeId, rowResultId, dotProductId)
-              : dotProductId;
           } else {
             /* TODO implement */
           }
+        }
+
+        /* If we computed vectors, accumulate those properly */
+        if (aType->scalarType == intermediateType && aType->vectorSize > 1) {
+          uint32_t localSumId = mod.op(spv::OpCompositeExtract, intermediateTypeId, rowResultId, 0u);
+
+          for (uint32_t i = 1u; i < aType->vectorSize; i++) {
+            localSumId = mod.op(spv::OpFAdd, intermediateTypeId, localSumId,
+              mod.op(spv::OpCompositeExtract, intermediateTypeId, rowResultId, i));
+          }
+
+          rowResultId = localSumId;
         }
 
         registerRows.at(localRow) = rowResultId;
