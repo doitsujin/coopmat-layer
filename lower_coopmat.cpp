@@ -1259,14 +1259,16 @@ public:
     while (auto ins = m_reader.readInstruction()) {
       switch (ins.op()) {
         case spv::OpCapability: {
-          if (spv::Capability(ins.arg(1u)) != spv::CapabilityCooperativeMatrixKHR)
+          if (spv::Capability(ins.arg(1u)) != spv::CapabilityCooperativeMatrixKHR
+           && spv::Capability(ins.arg(1u)) != spv::CapabilityCooperativeMatrixConversionsNV)
             m_builder.addIns(SpirvInstructionBuilder(ins));
         } break;
 
         case spv::OpExtension: {
           SpirvInstructionBuilder ext(ins);
 
-          if (ext.str(1u) != "SPV_KHR_cooperative_matrix")
+          if (ext.str(1u) != "SPV_KHR_cooperative_matrix"
+           && ext.str(1u) != "SPV_NV_cooperative_matrix2")
             m_builder.addIns(SpirvInstructionBuilder(ext));
         } break;
 
@@ -1355,7 +1357,8 @@ public:
         case spv::OpConvertFToU:
         case spv::OpConvertFToS:
         case spv::OpConvertSToF:
-        case spv::OpConvertUToF: {
+        case spv::OpConvertUToF:
+        case spv::OpCooperativeMatrixConvertNV: {
           auto* dstType = findCoopmatType(ins.arg(1u));
           auto* srcType = findCoopmatType(m_builder.getOperandTypeId(ins.arg(3u)));
 
@@ -1367,7 +1370,9 @@ public:
           CoopmatConvertFn fnInfo = { };
           fnInfo.dstType = dstType;
           fnInfo.srcType = srcType;
-          fnInfo.opcode = ins.op();
+
+          if (ins.op() != spv::OpCooperativeMatrixConvertNV)
+            fnInfo.opcode = ins.op();
 
           SpirvInstructionBuilder callOp(spv::OpFunctionCall, ins.arg(1u), ins.arg(2u));
           callOp.add(m_functions.get(fnInfo, m_builder));
